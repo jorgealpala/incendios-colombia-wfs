@@ -105,45 +105,66 @@ def cargar_incendios(anios):
         print(f"  [{anio}] {len(archivos)} archivos de incendios")
 
         for archivo in archivos:
-            origen = archivo.stem  # ej: 'choco', 'bogota'
-            with open(archivo, encoding="utf-8") as f:
-                gj = json.load(f)
-
-            for ft in gj.get("features", []):
-                p = ft.get("properties", {})
-                c = p.get("centroid")
-                # El centroid debe ser un dict con lat/lon validos
-                if not (isinstance(c, dict) and c.get("lat") is not None
-                        and c.get("lon") is not None):
-                    sin_centroide += 1
-                    continue
-
-                registros.append({
-                    "id": p.get("id"),
-                    "anio": anio,
-                    "archivo_origen": origen,
-                    "lon": c["lon"],
-                    "lat": c["lat"],
-                    "area": p.get("area"),
-                    "confidence": p.get("confidence"),
-                    "fire_confidence": p.get("fire_confidence"),
-                    "num_fires": p.get("num_fires"),
-                    "lifetime": p.get("lifetime"),
-                    "type_string": p.get("type_string"),
-                    "cause_string": p.get("cause_string"),
-                    "sub_area_name": p.get("sub_area_name"),
-                    "oldest_detection": p.get("oldest_detection"),
-                    "newest_detection": p.get("newest_detection"),
-                    "oldest_acquisition": p.get("oldest_acquisition"),
-                    "newest_acquisition": p.get("newest_acquisition"),
-                    # algorithms y satellites son listas -> a texto
-                    "algorithms": ",".join(p.get("algorithms", []) or []),
-                    "satellites": ",".join(p.get("satellites", []) or []),
-                })
+            regs, sc = leer_archivo_incendios(archivo, anio)
+            registros.extend(regs)
+            sin_centroide += sc
 
     if sin_centroide:
         print(f"  [aviso] {sin_centroide} incendios sin centroide valido (omitidos)")
 
+    return registros_a_gdf(registros)
+
+
+def leer_archivo_incendios(archivo, anio):
+    """
+    Lee UN geojson de incendios y devuelve (lista_de_registros, n_sin_centroide).
+    El 'archivo_origen' es el nombre del archivo sin extension (ej. 'bogota'),
+    igual que antes: asi la regla de Bogota por nombre sigue funcionando.
+    """
+    registros = []
+    sin_centroide = 0
+    origen = archivo.stem  # ej: 'choco', 'bogota', o un combinado diario
+
+    with open(archivo, encoding="utf-8") as f:
+        gj = json.load(f)
+
+    for ft in gj.get("features", []):
+        p = ft.get("properties", {})
+        c = p.get("centroid")
+        # El centroid debe ser un dict con lat/lon validos
+        if not (isinstance(c, dict) and c.get("lat") is not None
+                and c.get("lon") is not None):
+            sin_centroide += 1
+            continue
+
+        registros.append({
+            "id": p.get("id"),
+            "anio": anio,
+            "archivo_origen": origen,
+            "lon": c["lon"],
+            "lat": c["lat"],
+            "area": p.get("area"),
+            "confidence": p.get("confidence"),
+            "fire_confidence": p.get("fire_confidence"),
+            "num_fires": p.get("num_fires"),
+            "lifetime": p.get("lifetime"),
+            "type_string": p.get("type_string"),
+            "cause_string": p.get("cause_string"),
+            "sub_area_name": p.get("sub_area_name"),
+            "oldest_detection": p.get("oldest_detection"),
+            "newest_detection": p.get("newest_detection"),
+            "oldest_acquisition": p.get("oldest_acquisition"),
+            "newest_acquisition": p.get("newest_acquisition"),
+            # algorithms y satellites son listas -> a texto
+            "algorithms": ",".join(p.get("algorithms", []) or []),
+            "satellites": ",".join(p.get("satellites", []) or []),
+        })
+
+    return registros, sin_centroide
+
+
+def registros_a_gdf(registros):
+    """Convierte una lista de registros (dicts) en un GeoDataFrame de puntos."""
     df = pd.DataFrame(registros)
     gdf = gpd.GeoDataFrame(
         df,
@@ -183,9 +204,15 @@ def asignar_departamento_y_municipio(gdf_fires):
                errors="ignore")
 
     # --- BOGOTA: respetar la separacion de la plataforma ---
-    # Todo incendio que venga del archivo 'bogota' se etiqueta como Bogota,
-    # sin importar que geograficamente caiga dentro de Cundinamarca.
-    es_bogota = j["archivo_origen"] == NOMBRE_ARCHIVO_BOGOTA
+    # Dos casos se etiquetan como Bogota (unidad propia, como OroraTech):
+    #   (a) El incendio viene de un archivo de un solo depto llamado 'bogota'
+    #       (flujo de anios cerrados y de los geojson por-departamento de 2026).
+    #   (b) El incendio viene de un archivo COMBINADO (todos los deptos juntos,
+    #       como las descargas diarias 2026) y geograficamente cae en el
+    #       municipio 11001. En ese caso no hay nombre de archivo que ayude, asi
+    #       que se usa la ubicacion del join municipal.
+    es_bogota = (j["archivo_origen"] == NOMBRE_ARCHIVO_BOGOTA) | \
+                (j["cod_muni"].astype(str) == CODIGO_MUNI_BOGOTA)
     j.loc[es_bogota, "departamento"] = ETIQUETA_BOGOTA
     j.loc[es_bogota, "cod_depto"] = CODIGO_MUNI_BOGOTA
     j.loc[es_bogota, "municipio"] = ETIQUETA_BOGOTA

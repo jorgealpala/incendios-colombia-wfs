@@ -94,22 +94,52 @@ gj_munis = cargar_geojson(F_MUNIS)
 st.sidebar.title(":fire: Incendios Forestales")
 st.sidebar.caption("Fuente de datos: WildFire Solution - Ororatech")
 
-# ---- RANGO DE FECHAS (reemplaza al selector de años) ----
+# ---- RANGO DE FECHAS (selector rapido de año + calendario fino) ----
 fmin = df["fecha"].min()
 fmax = df["fecha"].max()
-fmin_d = fmin.date() if pd.notna(fmin) else dt.date(2024, 1, 1)
+fmin_d = fmin.date() if pd.notna(fmin) else dt.date(2016, 1, 1)
 fmax_d = fmax.date() if pd.notna(fmax) else dt.date.today()
+
+# Años disponibles en los datos (descendente: el mas reciente primero)
+anios_disp = sorted(df["fecha"].dt.year.dropna().astype(int).unique(), reverse=True)
+opciones_anio = ["Todos los años"] + [str(a) for a in anios_disp]
+sel_anio = st.sidebar.selectbox(
+    "Año", opciones_anio, index=0,
+    help="Atajo: elige un año para ver el periodo completo. "
+         "Para un rango más fino (días o meses), usa el calendario de abajo.")
+
+# Segun el año elegido, definir el rango por defecto del calendario
+if sel_anio == "Todos los años":
+    rango_def = (fmin_d, fmax_d)
+else:
+    a = int(sel_anio)
+    ini_a = max(dt.date(a, 1, 1), fmin_d)
+    fin_a = min(dt.date(a, 12, 31), fmax_d)
+    rango_def = (ini_a, fin_a)
+
+# La 'key' depende del año elegido y del rango de datos: al cambiar el año
+# (o al cargar datos nuevos) el calendario se reinicia al periodo correcto.
+key_fechas = f"rango_{sel_anio}_{fmin_d.isoformat()}_{fmax_d.isoformat()}"
 rango = st.sidebar.date_input(
     "Rango de fechas (inicio del incendio)",
-    value=(fmin_d, fmax_d), min_value=fmin_d, max_value=fmax_d,
-    help="Filtra por la fecha de primera detección satelital (oldest_acquisition).")
-# date_input puede devolver 1 o 2 fechas segun lo que el usuario haya elegido
+    value=rango_def, min_value=fmin_d, max_value=fmax_d,
+    key=key_fechas,
+    help="Filtra por la fecha de primera detección satelital (oldest_acquisition). "
+         "Puedes ajustar el rango día a día aquí.")
+# date_input puede devolver 1 fecha (mientras el usuario elige el rango) o 2.
 if isinstance(rango, (tuple, list)) and len(rango) == 2:
     fecha_ini, fecha_fin = rango
+elif isinstance(rango, (tuple, list)) and len(rango) == 1:
+    fecha_ini, fecha_fin = rango[0], rango_def[1]
 else:
-    fecha_ini = fecha_fin = rango if not isinstance(rango, (tuple, list)) else rango[0]
+    fecha_ini = fecha_fin = rango
 etiqueta_periodo = (f"{fecha_ini:%d/%m/%Y} – {fecha_fin:%d/%m/%Y}"
                     if fecha_ini != fecha_fin else f"{fecha_ini:%d/%m/%Y}")
+# Boton para recargar datos tras regenerar data/processed (limpia el cache)
+if st.sidebar.button("🔄 Recargar datos", help="Úsalo si actualizaste los datos "
+                     "(p. ej. agregaste un nuevo año) y no aparecen."):
+    st.cache_data.clear()
+    st.rerun()
 
 # ============ NAVEGACION (incluye depto/municipio) ============
 st.sidebar.divider()
