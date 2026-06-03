@@ -409,21 +409,50 @@ with g1:
         tooltip=["nivel", "eventos"]).properties(height=280))
     st.altair_chart(ch, width="stretch")
 with g2:
-    st.markdown("**Eventos por mes**")
-    if datos["mes"].notna().any():
+    st.markdown("**Eventos por mes (comparativo por año)**")
+    if datos["fecha"].notna().any():
         meses_abrev = {1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
                        7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"}
-        serie = datos.groupby("mes").size().reindex(range(1, 13)).fillna(0).reset_index()
-        serie.columns = ["mes", "eventos"]
-        serie["mes_nombre"] = serie["mes"].map(meses_abrev)
         orden_meses = list(meses_abrev.values())
-        ch = (alt.Chart(serie).mark_line(point=True, color="#2980b9").encode(
-            x=alt.X("mes_nombre:N", sort=orden_meses, title="Mes",
-                    axis=alt.Axis(labelAngle=0)),
+        tmp = datos.dropna(subset=["fecha"]).copy()
+        tmp["anio"] = tmp["fecha"].dt.year.astype(int)
+        tmp["mes"] = tmp["fecha"].dt.month.astype(int)
+        # Conteo por año y mes
+        serie = (tmp.groupby(["anio", "mes"]).size().reset_index(name="eventos"))
+        serie["mes_nombre"] = serie["mes"].map(meses_abrev)
+        serie["anio"] = serie["anio"].astype(str)
+        # Linea de promedio entre años (promedio de cada mes a traves de los años)
+        prom = (serie.groupby("mes")["eventos"].mean().reindex(range(1, 13))
+                .reset_index())
+        prom["mes_nombre"] = prom["mes"].map(meses_abrev)
+        prom["serie"] = "Promedio"
+
+        base_x = alt.X("mes_nombre:N", sort=orden_meses, title="Mes",
+                       axis=alt.Axis(labelAngle=0))
+        # Lineas por año (color por año). Paleta clara y diferenciable;
+        # el año mas reciente queda en rojo intenso (coherente con incendios).
+        anios_ord = sorted(serie["anio"].unique())
+        paleta_anios = ["#27ae60", "#2980b9", "#e74c3c", "#8e44ad",
+                        "#f39c12", "#16a085", "#c0392b"]
+        rango_colores = [paleta_anios[i % len(paleta_anios)] for i in range(len(anios_ord))]
+        lineas = (alt.Chart(serie).mark_line(point=True).encode(
+            x=base_x,
             y=alt.Y("eventos:Q", title="Eventos"),
+            color=alt.Color("anio:N", title="Año",
+                            scale=alt.Scale(domain=anios_ord, range=rango_colores)),
+            tooltip=[alt.Tooltip("anio:N", title="Año"),
+                     alt.Tooltip("mes_nombre:N", title="Mes"),
+                     alt.Tooltip("eventos:Q", title="Eventos")]))
+        # Linea de promedio (negra, punteada)
+        linea_prom = (alt.Chart(prom).mark_line(
+            strokeDash=[6, 4], color="#000000", point=False).encode(
+            x=base_x,
+            y=alt.Y("eventos:Q"),
             tooltip=[alt.Tooltip("mes_nombre:N", title="Mes"),
-                     alt.Tooltip("eventos:Q", title="Eventos")]).properties(height=280))
+                     alt.Tooltip("eventos:Q", title="Promedio", format=",.0f")]))
+        ch = (lineas + linea_prom).properties(height=280).resolve_scale(color="independent")
         st.altair_chart(ch, width="stretch")
+        st.caption("Cada línea de color es un año; la línea negra punteada es el promedio mensual entre años.")
     else:
         st.info("Sin datos de fecha para el periodo seleccionado.")
 
@@ -459,7 +488,38 @@ else:
                 tooltip=["satelite", "eventos"]).properties(height=280))
             st.altair_chart(ch, width="stretch")
 
-# ============ TABLA ============
+# Fila 3: serie DIARIA a todo el ancho (rango seleccionado por el usuario)
+st.markdown("**Eventos por día (rango seleccionado)**")
+if datos["fecha"].notna().any():
+    diaria = (datos.dropna(subset=["fecha"])
+              .assign(dia=lambda d: d["fecha"].dt.floor("D"))
+              .groupby("dia").size().reset_index(name="eventos"))
+    if len(diaria):
+        # Rellenar dias sin eventos con 0 para una serie continua
+        rango_dias = pd.date_range(diaria["dia"].min(), diaria["dia"].max(),
+                                   freq="D", tz="UTC")
+        diaria = (diaria.set_index("dia").reindex(rango_dias, fill_value=0)
+                  .rename_axis("dia").reset_index())
+        # Promedio movil de 7 dias
+        diaria["media7"] = diaria["eventos"].rolling(7, min_periods=1, center=True).mean()
+
+        base = alt.Chart(diaria).encode(
+            x=alt.X("dia:T", title="Fecha"))
+        linea_dia = base.mark_line(color="#bdc3c7", opacity=0.8).encode(
+            y=alt.Y("eventos:Q", title="Eventos"),
+            tooltip=[alt.Tooltip("dia:T", title="Día"),
+                     alt.Tooltip("eventos:Q", title="Eventos")])
+        linea_media = base.mark_line(color="#e74c3c", strokeWidth=2).encode(
+            y=alt.Y("media7:Q"),
+            tooltip=[alt.Tooltip("dia:T", title="Día"),
+                     alt.Tooltip("media7:Q", title="Media 7 días", format=",.1f")])
+        ch_dia = (linea_dia + linea_media).properties(height=300)
+        st.altair_chart(ch_dia, width="stretch")
+        st.caption("Línea gris: eventos diarios. Línea roja: promedio móvil de 7 días (suaviza el ruido).")
+    else:
+        st.info("Sin datos diarios para el periodo seleccionado.")
+else:
+    st.info("Sin datos de fecha para el periodo seleccionado.")
 st.divider()
 st.markdown("#### Tabla de eventos")
 cols = ["id", "departamento", "municipio", "area", "confidence", "fire_confidence",
