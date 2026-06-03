@@ -15,6 +15,7 @@ El alcance lo decide quien llama la funcion (nivel + filtros ya aplicados).
 import io
 import datetime as dt
 
+import pandas as pd
 import matplotlib
 matplotlib.use("Agg")  # backend sin pantalla, necesario en servidor/nube
 import matplotlib.pyplot as plt
@@ -107,17 +108,96 @@ def grafica_distribucion(datos, cats_presentes):
     return _fig_a_buffer(fig)
 
 
+MESES_ABREV = {1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
+               7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"}
+
+# Colores FIJOS por año (consistentes con el dashboard, estables al agregar años)
+PALETA_ANIOS = ["#27ae60", "#2980b9", "#e74c3c", "#8e44ad", "#f39c12",
+                "#16a085", "#c0392b", "#2c3e50", "#d35400", "#7f8c8d",
+                "#e67e22", "#1abc9c"]
+COLOR_ANIO = {a: PALETA_ANIOS[i % len(PALETA_ANIOS)]
+              for i, a in enumerate(range(2019, 2031))}
+
+
 def grafica_meses(datos):
+    """Eventos por mes: una línea por año + promedio mensual entre años."""
     fig, ax = plt.subplots(figsize=(5.0, 3.2))
-    meses = {1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
-             7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"}
-    serie = datos.groupby("mes").size().reindex(range(1, 13)).fillna(0)
-    ax.plot(range(1, 13), serie.values, marker="o", color="#2980b9")
+    tmp = datos.dropna(subset=["fecha"]).copy()
+    if len(tmp):
+        tmp["anio"] = tmp["fecha"].dt.year.astype(int)
+        serie = tmp.groupby(["anio", "mes"]).size().reset_index(name="eventos")
+        for anio in sorted(serie["anio"].unique()):
+            s = (serie[serie["anio"] == anio].set_index("mes")["eventos"]
+                 .reindex(range(1, 13)).fillna(0))
+            ax.plot(range(1, 13), s.values, marker="o", markersize=3,
+                    color=COLOR_ANIO.get(int(anio), "#888"), label=str(anio))
+        # Promedio entre años por mes
+        prom = serie.groupby("mes")["eventos"].mean().reindex(range(1, 13)).fillna(0)
+        ax.plot(range(1, 13), prom.values, linestyle="--", color="#000000",
+                linewidth=1.3, label="Promedio")
+        ax.legend(fontsize=6, ncol=2, loc="upper right", framealpha=0.9)
     ax.set_xticks(range(1, 13))
-    ax.set_xticklabels(list(meses.values()), fontsize=8)
+    ax.set_xticklabels(list(MESES_ABREV.values()), fontsize=8)
     ax.set_ylabel("Eventos")
-    ax.set_title("Eventos por mes", fontsize=11, fontweight="bold")
+    ax.set_title("Eventos por mes (por año)", fontsize=11, fontweight="bold")
     ax.spines[["top", "right"]].set_visible(False)
+    return _fig_a_buffer(fig)
+
+
+def grafica_diaria(datos):
+    """Serie diaria de eventos + promedio movil de 7 dias."""
+    fig, ax = plt.subplots(figsize=(10.5, 3.0))
+    tmp = datos.dropna(subset=["fecha"]).copy()
+    if len(tmp):
+        diaria = (tmp.assign(dia=tmp["fecha"].dt.floor("D"))
+                  .groupby("dia").size())
+        if len(diaria):
+            idx = pd.date_range(diaria.index.min(), diaria.index.max(),
+                                freq="D", tz="UTC")
+            diaria = diaria.reindex(idx, fill_value=0)
+            media7 = diaria.rolling(7, min_periods=1, center=True).mean()
+            ax.plot(diaria.index, diaria.values, color="#bdc3c7", linewidth=0.7)
+            ax.plot(media7.index, media7.values, color="#e74c3c", linewidth=1.6)
+    ax.set_ylabel("Eventos")
+    ax.set_title("Eventos por día (gris) y promedio móvil 7 días (rojo)",
+                 fontsize=11, fontweight="bold")
+    ax.spines[["top", "right"]].set_visible(False)
+    return _fig_a_buffer(fig)
+
+
+def grafica_anios(resumen, valor="eventos"):
+    """Barras por año (eventos o área), coloreadas con el color fijo de cada año."""
+    fig, ax = plt.subplots(figsize=(5.0, 3.2))
+    colores = [COLOR_ANIO.get(int(a), "#888") for a in resumen["anio"]]
+    if valor == "eventos":
+        ax.bar(resumen["anio"].astype(str), resumen["eventos"], color=colores)
+        ax.set_ylabel("Eventos")
+        ax.set_title("Eventos por año", fontsize=11, fontweight="bold")
+        # Etiqueta de variacion %
+        for i, (_, r) in enumerate(resumen.iterrows()):
+            if pd.notna(r.get("var_pct")):
+                col = "#c0392b" if r["var_pct"] >= 0 else "#27ae60"
+                ax.text(i, r["eventos"], f"{r['var_pct']:+.0f}%", ha="center",
+                        va="bottom", fontsize=8, fontweight="bold", color=col)
+    else:
+        ax.bar(resumen["anio"].astype(str), resumen["area"], color=colores)
+        ax.set_ylabel("Área (ha)")
+        ax.set_title("Área quemada por año", fontsize=11, fontweight="bold")
+    ax.spines[["top", "right"]].set_visible(False)
+    return _fig_a_buffer(fig)
+
+
+def torta_anios(resumen, valor="eventos"):
+    """Torta (dona) de eventos o área por año, con color fijo por año."""
+    fig, ax = plt.subplots(figsize=(3.4, 3.4))
+    colores = [COLOR_ANIO.get(int(a), "#888") for a in resumen["anio"]]
+    vals = resumen[valor].values
+    etiquetas = resumen["anio"].astype(str).values
+    if vals.sum() > 0:
+        ax.pie(vals, labels=etiquetas, colors=colores, autopct="%1.0f%%",
+               startangle=90, wedgeprops=dict(width=0.45), textprops={"fontsize": 8})
+    titulo = "Eventos por año" if valor == "eventos" else "Área por año"
+    ax.set_title(titulo, fontsize=10, fontweight="bold")
     return _fig_a_buffer(fig)
 
 
@@ -251,12 +331,45 @@ def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
     story.append(Image(g_dist, width=11 * cm, height=7 * cm))
     story.append(Spacer(1, 8))
 
-    if datos["mes"].notna().any():
+    if datos["fecha"].notna().any():
         g_mes = grafica_meses(datos)
         story.append(Image(g_mes, width=11 * cm, height=7 * cm))
         story.append(Spacer(1, 8))
+        # Serie diaria (a todo el ancho)
+        g_dia = grafica_diaria(datos)
+        story.append(Image(g_dia, width=16 * cm, height=4.6 * cm))
+        story.append(Spacer(1, 8))
 
-    # Tops segun nivel
+    # --- Analisis comparativo por año (tortas + barras de tendencia) ---
+    serie_anual = (datos.dropna(subset=["fecha"])
+                   .assign(anio=lambda d: d["fecha"].dt.year.astype(int)))
+    if len(serie_anual):
+        resumen = (serie_anual.groupby("anio")
+                   .agg(eventos=("id", "size"), area=("area", "sum"))
+                   .reset_index().sort_values("anio"))
+        resumen["var_pct"] = resumen["eventos"].pct_change() * 100
+
+        story.append(PageBreak())
+        story.append(Paragraph("Análisis comparativo por año", h2))
+        story.append(Spacer(1, 6))
+        # Tortas lado a lado (eventos y area)
+        t_ev = torta_anios(resumen, "eventos")
+        t_ar = torta_anios(resumen, "area")
+        fila_tortas = Table([[Image(t_ev, width=7 * cm, height=7 * cm),
+                              Image(t_ar, width=7 * cm, height=7 * cm)]],
+                            colWidths=[8 * cm, 8 * cm])
+        fila_tortas.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+        story.append(fila_tortas)
+        story.append(Spacer(1, 8))
+        # Barras: eventos por año (con variacion %) y area por año
+        story.append(Image(grafica_anios(resumen, "eventos"),
+                            width=11 * cm, height=7 * cm))
+        story.append(Spacer(1, 8))
+        story.append(Image(grafica_anios(resumen, "area"),
+                            width=11 * cm, height=7 * cm))
+
+    # --- Tops segun nivel (al final del analisis) ---
+    story.append(PageBreak())
     if nivel == "Nacional":
         story.append(Image(grafica_top(datos, "departamento",
                      "Top 10 departamentos por eventos"), width=11 * cm, height=7.5 * cm))

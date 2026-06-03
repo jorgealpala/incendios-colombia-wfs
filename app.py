@@ -48,6 +48,23 @@ COLOR_CONF = {
 ETIQUETAS = {"0.0": "0.0 (insuficiente)", "0.2": "0.2", "0.4": "0.4",
              "0.6": "0.6", "0.8": "0.8", "1.0": "1.0"}
 
+# --- Colores FIJOS por año (consistentes en todas las gráficas) ---
+# Cada año tiene su color asignado de forma estable: aunque se agreguen años
+# nuevos (p. ej. 2019-2023 más adelante), los existentes NO cambian de color.
+PALETA_ANIOS = ["#27ae60", "#2980b9", "#e74c3c", "#8e44ad", "#f39c12",
+                "#16a085", "#c0392b", "#2c3e50", "#d35400", "#7f8c8d",
+                "#e67e22", "#1abc9c"]
+# Asignacion estable por año concreto (2019 en adelante)
+ANIOS_REF = list(range(2019, 2031))
+COLOR_ANIO = {a: PALETA_ANIOS[i % len(PALETA_ANIOS)] for i, a in enumerate(ANIOS_REF)}
+
+def escala_color_anios(anios):
+    """Devuelve (domain, range) de colores para una lista de años dada,
+    usando el color FIJO de cada año (consistente entre todas las gráficas)."""
+    dom = [str(a) for a in sorted(anios)]
+    rng = [COLOR_ANIO.get(int(a), "#95a5a6") for a in sorted(anios)]
+    return dom, rng
+
 def cat_confidence(v):
     if v is None or pd.isna(v):
         return "Sin dato"
@@ -110,7 +127,13 @@ sel_anio = st.sidebar.selectbox(
 
 # Segun el año elegido, definir el rango por defecto del calendario
 if sel_anio == "Todos los años":
-    rango_def = (fmin_d, fmax_d)
+    # Rango por defecto institucional: 01/01/2024 a 31/05/2026,
+    # siempre acotado a lo que realmente exista en los datos.
+    ini_def = max(dt.date(2024, 1, 1), fmin_d)
+    fin_def = min(dt.date(2026, 5, 31), fmax_d)
+    if ini_def > fin_def:        # por si los datos no alcanzan ese rango
+        ini_def, fin_def = fmin_d, fmax_d
+    rango_def = (ini_def, fin_def)
 else:
     a = int(sel_anio)
     ini_a = max(dt.date(a, 1, 1), fmin_d)
@@ -175,8 +198,13 @@ st.sidebar.subheader("Confianza del incendio")
 cats_presentes = [c for c in ORDEN_CONF if c in df["cat"].unique()]
 mostrar_insuf = st.sidebar.checkbox("Mostrar incidentes con datos insuficientes", value=False)
 cats_filtrables = [c for c in cats_presentes if c != "0.0"]
+# Por defecto, activar solo los niveles de confianza alta (0.6, 0.8, 1.0).
+# Si alguno no existe en los datos, simplemente no aparece.
+default_conf = [c for c in ["0.6", "0.8", "1.0"] if c in cats_filtrables]
+if not default_conf:                       # respaldo: si no hay altos, mostrar todos
+    default_conf = cats_filtrables
 cats_sel = st.sidebar.multiselect(
-    "Filtrar niveles de confianza", cats_filtrables, default=cats_filtrables,
+    "Filtrar niveles de confianza", cats_filtrables, default=default_conf,
     format_func=lambda x: ETIQUETAS.get(x, x))
 if not cats_sel:
     cats_sel = cats_filtrables
@@ -186,15 +214,6 @@ categorias_visibles = list(cats_sel)
 if mostrar_insuf and "0.0" in cats_presentes:
     categorias_visibles.append("0.0")
 dff = base[base["cat"].isin(categorias_visibles)]
-
-# ---- Leyenda ----
-st.sidebar.divider()
-st.sidebar.subheader("Leyenda")
-for etq in cats_presentes:
-    st.sidebar.markdown(
-        f"<span style='display:inline-block;width:14px;height:14px;"
-        f"background:{COLOR_CONF[etq]};border-radius:3px;margin-right:8px;'></span>{ETIQUETAS[etq]}",
-        unsafe_allow_html=True)
 
 # ---- REPORTE PDF (control; la generacion va al final cuando 'datos' existe) ----
 st.sidebar.divider()
@@ -429,17 +448,15 @@ with g2:
 
         base_x = alt.X("mes_nombre:N", sort=orden_meses, title="Mes",
                        axis=alt.Axis(labelAngle=0))
-        # Lineas por año (color por año). Paleta clara y diferenciable;
-        # el año mas reciente queda en rojo intenso (coherente con incendios).
+        # Lineas por año, con color FIJO por año (consistente con las
+        # graficas de analisis comparativo y estable al agregar años nuevos).
         anios_ord = sorted(serie["anio"].unique())
-        paleta_anios = ["#27ae60", "#2980b9", "#e74c3c", "#8e44ad",
-                        "#f39c12", "#16a085", "#c0392b"]
-        rango_colores = [paleta_anios[i % len(paleta_anios)] for i in range(len(anios_ord))]
+        dom_anios, rng_anios = escala_color_anios(anios_ord)
         lineas = (alt.Chart(serie).mark_line(point=True).encode(
             x=base_x,
             y=alt.Y("eventos:Q", title="Eventos"),
             color=alt.Color("anio:N", title="Año",
-                            scale=alt.Scale(domain=anios_ord, range=rango_colores)),
+                            scale=alt.Scale(domain=dom_anios, range=rng_anios)),
             tooltip=[alt.Tooltip("anio:N", title="Año"),
                      alt.Tooltip("mes_nombre:N", title="Mes"),
                      alt.Tooltip("eventos:Q", title="Eventos")]))
@@ -456,39 +473,7 @@ with g2:
     else:
         st.info("Sin datos de fecha para el periodo seleccionado.")
 
-# Fila 2: tops segun nivel (eventos + area)
-g3, g4 = st.columns(2)
-if nivel == "Nacional":
-    with g3: barras_top(dff, "departamento", "Top 10 departamentos por eventos", "#e74c3c", "eventos")
-    with g4: barras_top(dff, "departamento", "Top 10 departamentos por área (ha)", "#c0392b", "area")
-elif nivel == "Departamental":
-    with g3: barras_top(datos, "municipio", "Top 10 municipios por eventos", "#e74c3c", "eventos")
-    with g4: barras_top(datos, "municipio", "Top 10 municipios por área (ha)", "#c0392b", "area")
-else:
-    # Municipal: distribucion de tamaños de incendio
-    with g3:
-        st.markdown("**Distribución de área por evento (ha)**")
-        if len(datos):
-            ch = (alt.Chart(datos.assign(a=datos["area"].clip(upper=datos["area"].quantile(0.98))))
-                  .mark_bar(color="#e67e22").encode(
-                      x=alt.X("a:Q", bin=alt.Bin(maxbins=25), title="Área (ha)"),
-                      y=alt.Y("count():Q", title="Eventos")).properties(height=280))
-            st.altair_chart(ch, width="stretch")
-    with g4:
-        st.markdown("**Eventos por satélite**")
-        if "satellites" in datos.columns and len(datos):
-            sat = (datos.assign(sat=datos["satellites"].fillna("").str.split(","))
-                   .explode("sat"))
-            sat = sat[sat["sat"] != ""]
-            top = sat.groupby("sat").size().sort_values(ascending=False).head(10).reset_index()
-            top.columns = ["satelite", "eventos"]
-            ch = (alt.Chart(top).mark_bar(color="#16a085").encode(
-                x=alt.X("eventos:Q", title="Eventos"),
-                y=alt.Y("satelite:N", sort="-x", title=None),
-                tooltip=["satelite", "eventos"]).properties(height=280))
-            st.altair_chart(ch, width="stretch")
-
-# Fila 3: serie DIARIA a todo el ancho (rango seleccionado por el usuario)
+# Fila: serie DIARIA a todo el ancho (rango seleccionado por el usuario)
 st.markdown("**Eventos por día (rango seleccionado)**")
 if datos["fecha"].notna().any():
     diaria = (datos.dropna(subset=["fecha"])
@@ -520,6 +505,109 @@ if datos["fecha"].notna().any():
         st.info("Sin datos diarios para el periodo seleccionado.")
 else:
     st.info("Sin datos de fecha para el periodo seleccionado.")
+
+# ============ Análisis por AÑO (tortas + tendencia) ============
+# Usa 'datos' (filtrado por fecha, confianza Y nivel geografico seleccionado),
+# para que al navegar a un departamento o municipio estas graficas reflejen
+# esa zona, igual que los KPIs y las demas graficas.
+serie_anual = (datos.dropna(subset=["fecha"])
+               .assign(anio=lambda d: d["fecha"].dt.year.astype(int)))
+if len(serie_anual):
+    resumen = (serie_anual.groupby("anio")
+               .agg(eventos=("id", "size"), area=("area", "sum"))
+               .reset_index().sort_values("anio"))
+    resumen["anio_str"] = resumen["anio"].astype(str)
+    # Variacion % de eventos respecto al año anterior
+    resumen["var_pct"] = resumen["eventos"].pct_change() * 100
+
+    st.markdown("**Análisis comparativo por año**")
+    pa, pb, pc = st.columns(3)
+
+    # Escala de color FIJA por año, igual que en la gráfica de eventos por mes.
+    dom_a, rng_a = escala_color_anios(resumen["anio"].tolist())
+    escala_anio = alt.Scale(domain=dom_a, range=rng_a)
+
+    # (a) Tortas: eventos por año y área por año
+    with pa:
+        torta_ev = (alt.Chart(resumen).mark_arc(innerRadius=40).encode(
+            theta=alt.Theta("eventos:Q"),
+            color=alt.Color("anio_str:N", title="Año", scale=escala_anio),
+            tooltip=[alt.Tooltip("anio_str:N", title="Año"),
+                     alt.Tooltip("eventos:Q", title="Eventos", format=",")]
+        ).properties(height=220, title="Eventos por año"))
+        st.altair_chart(torta_ev, width="stretch")
+
+        torta_ar = (alt.Chart(resumen).mark_arc(innerRadius=40).encode(
+            theta=alt.Theta("area:Q"),
+            color=alt.Color("anio_str:N", title="Año", scale=escala_anio),
+            tooltip=[alt.Tooltip("anio_str:N", title="Año"),
+                     alt.Tooltip("area:Q", title="Área (ha)", format=",.0f")]
+        ).properties(height=220, title="Área quemada por año"))
+        st.altair_chart(torta_ar, width="stretch")
+
+    # (b) Barras de eventos por año con variacion % (tendencia)
+    with pb:
+        st.caption("Eventos por año y su variación frente al año anterior")
+        barras_ev = (alt.Chart(resumen).mark_bar().encode(
+            x=alt.X("anio_str:N", title="Año"),
+            y=alt.Y("eventos:Q", title="Eventos"),
+            color=alt.Color("anio_str:N", scale=escala_anio, legend=None),
+            tooltip=[alt.Tooltip("anio_str:N", title="Año"),
+                     alt.Tooltip("eventos:Q", title="Eventos", format=","),
+                     alt.Tooltip("var_pct:Q", title="Var. % vs año anterior", format="+.1f")]
+        ).properties(height=300))
+        # Etiqueta con la variacion % encima de cada barra (desde el 2do año)
+        etiquetas = (alt.Chart(resumen[resumen["var_pct"].notna()])
+                     .mark_text(dy=-8, fontSize=11, fontWeight="bold")
+                     .encode(x=alt.X("anio_str:N"), y=alt.Y("eventos:Q"),
+                             text=alt.Text("var_pct:Q", format="+.0f"),
+                             color=alt.condition(alt.datum.var_pct >= 0,
+                                                 alt.value("#c0392b"), alt.value("#27ae60"))))
+        st.altair_chart(barras_ev + etiquetas, width="stretch")
+
+    # (c) Barras de area quemada por año
+    with pc:
+        st.caption("Superficie quemada por año (hectáreas)")
+        barras_ar = (alt.Chart(resumen).mark_bar().encode(
+            x=alt.X("anio_str:N", title="Año"),
+            y=alt.Y("area:Q", title="Área (ha)"),
+            color=alt.Color("anio_str:N", scale=escala_anio, legend=None),
+            tooltip=[alt.Tooltip("anio_str:N", title="Año"),
+                     alt.Tooltip("area:Q", title="Área (ha)", format=",.0f")]
+        ).properties(height=300))
+        st.altair_chart(barras_ar, width="stretch")
+
+# ============ TOPS (al final, antes de la tabla) ============
+g3, g4 = st.columns(2)
+if nivel == "Nacional":
+    with g3: barras_top(dff, "departamento", "Top 10 departamentos por eventos", "#e74c3c", "eventos")
+    with g4: barras_top(dff, "departamento", "Top 10 departamentos por área (ha)", "#c0392b", "area")
+elif nivel == "Departamental":
+    with g3: barras_top(datos, "municipio", "Top 10 municipios por eventos", "#e74c3c", "eventos")
+    with g4: barras_top(datos, "municipio", "Top 10 municipios por área (ha)", "#c0392b", "area")
+else:
+    with g3:
+        st.markdown("**Distribución de área por evento (ha)**")
+        if len(datos):
+            ch = (alt.Chart(datos.assign(a=datos["area"].clip(upper=datos["area"].quantile(0.98))))
+                  .mark_bar(color="#e67e22").encode(
+                      x=alt.X("a:Q", bin=alt.Bin(maxbins=25), title="Área (ha)"),
+                      y=alt.Y("count():Q", title="Eventos")).properties(height=280))
+            st.altair_chart(ch, width="stretch")
+    with g4:
+        st.markdown("**Eventos por satélite**")
+        if "satellites" in datos.columns and len(datos):
+            sat = (datos.assign(sat=datos["satellites"].fillna("").str.split(","))
+                   .explode("sat"))
+            sat = sat[sat["sat"] != ""]
+            top = sat.groupby("sat").size().sort_values(ascending=False).head(10).reset_index()
+            top.columns = ["satelite", "eventos"]
+            ch = (alt.Chart(top).mark_bar(color="#16a085").encode(
+                x=alt.X("eventos:Q", title="Eventos"),
+                y=alt.Y("satelite:N", sort="-x", title=None),
+                tooltip=["satelite", "eventos"]).properties(height=280))
+            st.altair_chart(ch, width="stretch")
+
 st.divider()
 st.markdown("#### Tabla de eventos")
 cols = ["id", "departamento", "municipio", "area", "confidence", "fire_confidence",
