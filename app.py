@@ -397,7 +397,7 @@ else:  # Municipal
 
 # ============ GRAFICAS: dos por fila, debajo del mapa ============
 st.divider()
-st.markdown("### Análisis")
+st.markdown("### 📊 Análisis")
 
 def barras_top(data, campo, titulo, color, valor="eventos"):
     st.markdown(f"**{titulo}**")
@@ -608,6 +608,111 @@ else:
                 tooltip=["satelite", "eventos"]).properties(height=280))
             st.altair_chart(ch, width="stretch")
 
+# ============================================================================
+# ANÁLISIS PARA GESTIÓN DEL RIESGO (recurrencia, estacionalidad, anticipación)
+# A nivel municipal NO se muestra: no aporta (un solo municipio) y es pesado.
+# ============================================================================
+if nivel != "Municipal":
+    st.divider()
+    st.markdown("### \U0001F50E An\u00e1lisis para gesti\u00f3n del riesgo")
+    st.caption("Herramientas para anticipar y priorizar ante la temporada seca / Fen\u00f3meno de El Ni\u00f1o. "
+               "Usan el periodo y filtros seleccionados arriba.")
+
+    if nivel == "Departamental" and st.session_state.departamento:
+        ambito = dff[dff["departamento"] == st.session_state.departamento]
+        txt_ambito = f"departamento de {st.session_state.departamento}"
+    else:
+        ambito = dff
+        txt_ambito = "nivel nacional"
+
+    amb = ambito.dropna(subset=["fecha", "municipio", "departamento"]).copy()
+    if len(amb):
+        amb["anio"] = amb["fecha"].dt.year.astype(int)
+        amb["mes"] = amb["fecha"].dt.month.astype(int)
+        MESES_AB = {1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
+                    7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"}
+        etq_muni = lambda d, m: f"{m} ({d})"
+
+        # ---------- 1) RECURRENCIA ESTACIONAL ----------
+        st.markdown("**1. Recurrencia estacional**")
+        st.caption("Municipios que se queman **en el mismo mes** a lo largo de varios a\u00f1os. "
+                   "Alta recurrencia = patr\u00f3n estacional predecible que permite anticipar.")
+        rec = (amb.groupby(["departamento", "municipio", "mes"])
+               .agg(anios=("anio", "nunique"), eventos=("id", "size")).reset_index())
+        rec = rec[rec["anios"] >= 2]
+        if len(rec):
+            rec["Municipio"] = rec["municipio"] + " (" + rec["departamento"] + ")"
+            rec["Mes"] = rec["mes"].map(MESES_AB)
+            rec = rec.sort_values(["anios", "eventos"], ascending=False)
+            tabla_rec = (rec[["Municipio", "Mes", "anios", "eventos"]]
+                         .rename(columns={"anios": "A\u00f1os recurrentes", "eventos": "Eventos totales"})
+                         .head(15).reset_index(drop=True))
+            st.dataframe(tabla_rec, width="stretch", hide_index=True)
+        else:
+            tabla_rec = None
+            st.info("No hay suficientes a\u00f1os en el periodo para detectar recurrencia estacional. "
+                    "Ampl\u00eda el rango de fechas para incluir varios a\u00f1os.")
+
+        # ---------- 2) MAPA DE CALOR municipio x mes ----------
+        st.markdown("**2. Mapa de calor de estacionalidad (municipio × mes)**")
+        st.caption("Para los municipios con m\u00e1s eventos: en qu\u00e9 meses concentran su actividad. "
+                   "Revela las ventanas de riesgo de cada territorio.")
+        top_munis = (amb.groupby(["departamento", "municipio"]).size()
+                     .sort_values(ascending=False).head(15).reset_index())
+        top_munis["Municipio"] = top_munis["municipio"] + " (" + top_munis["departamento"] + ")"
+        nombres_top = set(zip(top_munis["departamento"], top_munis["municipio"]))
+        mask_top = amb.set_index(["departamento", "municipio"]).index.isin(nombres_top)
+        heat = amb[mask_top].copy()
+        if len(heat):
+            heat["Municipio"] = heat["municipio"] + " (" + heat["departamento"] + ")"
+            heat_g = heat.groupby(["Municipio", "mes"]).size().reset_index(name="eventos")
+            heat_g["Mes"] = heat_g["mes"].map(MESES_AB)
+            orden_muni = top_munis["Municipio"].tolist()
+            ch_heat = (alt.Chart(heat_g).mark_rect().encode(
+                x=alt.X("Mes:N", sort=list(MESES_AB.values()), title="Mes"),
+                y=alt.Y("Municipio:N", sort=orden_muni, title=None),
+                color=alt.Color("eventos:Q", scale=alt.Scale(scheme="orangered"), title="Eventos"),
+                tooltip=["Municipio", "Mes", alt.Tooltip("eventos:Q", title="Eventos")]
+            ).properties(height=380))
+            st.altair_chart(ch_heat, width="stretch")
+
+        # ---------- 3) y 4) ----------
+        cR, cE = st.columns(2)
+        with cR:
+            st.markdown("**3. Municipios reincidentes**")
+            st.caption("M\u00e1s a\u00f1os distintos con incendios = vigilancia prioritaria.")
+            reinc = (amb.groupby(["departamento", "municipio"])
+                     .agg(anios=("anio", "nunique"), eventos=("id", "size")).reset_index())
+            reinc["Municipio"] = reinc["municipio"] + " (" + reinc["departamento"] + ")"
+            reinc = reinc.sort_values(["anios", "eventos"], ascending=False)
+            tabla_reinc = (reinc[["Municipio", "anios", "eventos"]]
+                           .rename(columns={"anios": "A\u00f1os activos", "eventos": "Eventos"})
+                           .head(12).reset_index(drop=True))
+            st.dataframe(tabla_reinc, width="stretch", hide_index=True)
+        with cE:
+            st.markdown("**4. Distribución histórica por mes**")
+            st.caption("Distribuci\u00f3n hist\u00f3rica por mes. Se\u00f1ala las ventanas en que "
+                       "concentrar recursos de prevenci\u00f3n y respuesta.")
+            cal = amb.groupby("mes").size().reindex(range(1, 13)).fillna(0).reset_index()
+            cal.columns = ["mes", "eventos"]
+            cal["Mes"] = cal["mes"].map(MESES_AB)
+            pico = int(cal.loc[cal["eventos"].idxmax(), "mes"])
+            ch_cal = (alt.Chart(cal).mark_bar().encode(
+                x=alt.X("Mes:N", sort=list(MESES_AB.values()), title="Mes", axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("eventos:Q", title="Eventos (hist\u00f3rico)"),
+                color=alt.condition(alt.datum.mes == pico, alt.value("#c0392b"), alt.value("#e67e22")),
+                tooltip=["Mes", alt.Tooltip("eventos:Q", title="Eventos")]
+            ).properties(height=300))
+            st.altair_chart(ch_cal, width="stretch")
+            st.caption(f"Mes pico hist\u00f3rico en {txt_ambito}: **{MESES_AB[pico]}**.")
+
+        if tabla_rec is not None:
+            st.download_button("Descargar an\u00e1lisis de recurrencia (CSV)",
+                               tabla_rec.to_csv(index=False).encode("utf-8"),
+                               file_name="recurrencia_estacional.csv", mime="text/csv")
+    else:
+        st.info("No hay datos suficientes en el periodo seleccionado para el an\u00e1lisis de gesti\u00f3n del riesgo.")
+
 st.divider()
 st.markdown("#### Tabla de eventos")
 cols = ["id", "departamento", "municipio", "area", "confidence", "fire_confidence",
@@ -670,17 +775,39 @@ if st.session_state.get("pdf_bytes"):
         file_name=st.session_state.get("pdf_fname", "reporte.pdf"),
         mime="application/pdf")
 
-# ============ PIE DE PAGINA: descargo, autoria y creditos ============
+# ============ PIE DE PAGINA: terminos de uso, autoria, creditos y cita ============
 st.divider()
-st.markdown("#### Descargo de responsabilidad")
+st.markdown("#### Términos de uso")
 st.markdown(
     "<div style='font-size:13px;color:#444;text-align:justify;'>"
-    "La UNGRD, a través de la SCR, comparte la siguiente información, "
-    "deslindándose de cualquier responsabilidad sobre el uso que se le dé. "
-    "Los datos presentados han sido generados a partir de información extraída "
-    "de la plataforma WFS de Ororatech. Este visor se suministra con el propósito "
-    "de orientar la toma de decisiones; sin embargo, su correcto uso y aplicación "
-    "son responsabilidad exclusiva de cada persona o entidad territorial."
+    "Los GeoVisores de la Unidad Nacional para la Gestión del Riesgo de Desastres "
+    "– UNGRD tienen como propósito facilitar al público en general el acceso, consulta "
+    "y visualización de información geográfica y temática relacionada con la gestión "
+    "del riesgo de desastres en Colombia, en sus versiones oficiales más recientes.<br><br>"
+    "Le solicitamos leer atentamente los presentes términos de uso antes de hacer uso "
+    "de este portal web. La consulta, visualización, descarga o utilización de la "
+    "información contenida en los GeoVisores de la UNGRD implica la aceptación y "
+    "cumplimiento de las siguientes condiciones:"
+    "<ul style='margin-top:6px;'>"
+    "<li>Utilizar la información y los contenidos de manera adecuada, responsable y "
+    "conforme a la normatividad vigente.</li>"
+    "<li>Respetar los derechos de autor y citar adecuadamente la fuente de información: "
+    "Unidad Nacional para la Gestión del Riesgo de Desastres – UNGRD y las entidades "
+    "proveedoras de datos cuando corresponda.</li>"
+    "<li>No copiar, modificar, distribuir, comercializar o utilizar con fines indebidos "
+    "la información publicada en los GeoVisores de la UNGRD sin la debida autorización.</li>"
+    "<li>No eliminar, alterar u ocultar avisos, logotipos, marcas, créditos, metadatos "
+    "o cualquier elemento relacionado con la propiedad intelectual de la UNGRD o de las "
+    "entidades aliadas.</li>"
+    "<li>La información publicada tiene carácter informativo y de apoyo para la toma de "
+    "decisiones; su uso e interpretación es responsabilidad exclusiva del usuario.</li>"
+    "<li>La UNGRD no garantiza que la información esté libre de errores o interrupciones "
+    "y podrá actualizar, modificar o retirar contenidos sin previo aviso.</li>"
+    "<li>Queda prohibido incorporar publicidad, alterar la integridad de la información "
+    "o realizar acciones que afecten el funcionamiento, seguridad o disponibilidad de "
+    "los GeoVisores.</li>"
+    "</ul>"
+    "<b>UNIDAD NACIONAL PARA LA GESTIÓN DEL RIESGO DE DESASTRES – UNGRD</b>"
     "</div>", unsafe_allow_html=True)
 
 st.write("")
@@ -702,3 +829,13 @@ with cred2:
         "Shapely, Pandas, Altair, Matplotlib y ReportLab. "
         "Mapas base: OpenStreetMap · CARTO."
         "</div>", unsafe_allow_html=True)
+
+st.write("")
+st.markdown(
+    "<div style='font-size:12px;color:#666;border-top:1px solid #ddd;padding-top:8px;'>"
+    "<b>Cómo citar este visor:</b><br>"
+    "Alpala, J. (2026). <i>Incendios Forestales – Colombia: GeoVisor de monitoreo y "
+    "análisis de incendios con datos de WildFire Solution (OroraTech)</i>. Unidad "
+    "Nacional para la Gestión del Riesgo de Desastres (UNGRD), Subdirección para el "
+    "Conocimiento del Riesgo. Recuperado de https://incendios-colombia-wfs.streamlit.app"
+    "</div>", unsafe_allow_html=True)

@@ -218,6 +218,63 @@ def grafica_top(datos, campo, titulo, por_area=False):
     return _fig_a_buffer(fig)
 
 
+def grafica_heatmap(amb, meses_ab):
+    """Mapa de calor municipio x mes (top 15 municipios por eventos)."""
+    top = (amb.groupby(["departamento", "municipio"]).size()
+           .sort_values(ascending=False).head(15).reset_index())
+    top["etq"] = top["municipio"] + " (" + top["departamento"] + ")"
+    nombres = set(zip(top["departamento"], top["municipio"]))
+    mask = amb.set_index(["departamento", "municipio"]).index.isin(nombres)
+    heat = amb[mask].copy()
+    heat["etq"] = heat["municipio"] + " (" + heat["departamento"] + ")"
+    piv = (heat.groupby(["etq", "mes"]).size().unstack(fill_value=0)
+           .reindex(columns=range(1, 13), fill_value=0))
+    # Ordenar por total de eventos (descendente) para que coincida con el top
+    piv = piv.reindex(top["etq"].tolist()).fillna(0)
+    fig, ax = plt.subplots(figsize=(7.0, 5.0))
+    im = ax.imshow(piv.values, aspect="auto", cmap="OrRd")
+    ax.set_xticks(range(12))
+    ax.set_xticklabels([meses_ab[m] for m in range(1, 13)], fontsize=8)
+    ax.set_yticks(range(len(piv)))
+    ax.set_yticklabels(piv.index, fontsize=7)
+    ax.set_title("Mapa de calor de estacionalidad (municipio × mes)",
+                 fontsize=11, fontweight="bold")
+    fig.colorbar(im, ax=ax, shrink=0.6, label="Eventos")
+    return _fig_a_buffer(fig)
+
+
+def grafica_calendario(amb, meses_ab):
+    """Distribucion historica de eventos por mes, con el mes pico resaltado."""
+    fig, ax = plt.subplots(figsize=(5.0, 3.2))
+    cal = amb.groupby("mes").size().reindex(range(1, 13)).fillna(0)
+    pico = int(cal.idxmax())
+    colores = ["#c0392b" if m == pico else "#e67e22" for m in range(1, 13)]
+    ax.bar(range(1, 13), cal.values, color=colores)
+    ax.set_xticks(range(1, 13))
+    ax.set_xticklabels([meses_ab[m] for m in range(1, 13)], fontsize=8)
+    ax.set_ylabel("Eventos (histórico)")
+    ax.set_title("Distribución histórica por mes", fontsize=11, fontweight="bold")
+    ax.spines[["top", "right"]].set_visible(False)
+    return _fig_a_buffer(fig)
+
+
+def tabla_recurrencia(amb, meses_ab):
+    """Devuelve (DataFrame recurrencia, DataFrame reincidentes) para tablas del PDF."""
+    rec = (amb.groupby(["departamento", "municipio", "mes"])
+           .agg(anios=("anio", "nunique"), eventos=("id", "size")).reset_index())
+    rec = rec[rec["anios"] >= 2].sort_values(["anios", "eventos"], ascending=False)
+    rec["Municipio"] = rec["municipio"] + " (" + rec["departamento"] + ")"
+    rec["Mes"] = rec["mes"].map(meses_ab)
+    rec_out = rec[["Municipio", "Mes", "anios", "eventos"]].head(12)
+
+    reinc = (amb.groupby(["departamento", "municipio"])
+             .agg(anios=("anio", "nunique"), eventos=("id", "size")).reset_index())
+    reinc["Municipio"] = reinc["municipio"] + " (" + reinc["departamento"] + ")"
+    reinc = reinc.sort_values(["anios", "eventos"], ascending=False)
+    reinc_out = reinc[["Municipio", "anios", "eventos"]].head(12)
+    return rec_out, reinc_out
+
+
 # ----------------------------------------------------------------------
 # GENERADOR DEL PDF
 # ----------------------------------------------------------------------
@@ -385,6 +442,84 @@ def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
                      "Top 10 municipios por área", por_area=True),
                      width=11 * cm, height=7.5 * cm))
 
+    # --- ANÁLISIS PARA GESTIÓN DEL RIESGO (solo nacional/departamental) ---
+    if nivel != "Municipal":
+        amb = datos.dropna(subset=["fecha", "municipio", "departamento"]).copy()
+        if len(amb):
+            amb["anio"] = amb["fecha"].dt.year.astype(int)
+            amb["mes"] = amb["fecha"].dt.month.astype(int)
+            meses_ab = {1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
+                        7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"}
+            story.append(PageBreak())
+            story.append(Paragraph("Análisis para gestión del riesgo", h2))
+            story.append(Paragraph(
+                "Herramientas para anticipar y priorizar ante la temporada seca / "
+                "Fenómeno de El Niño.", small))
+            story.append(Spacer(1, 8))
+
+            rec_df, reinc_df = tabla_recurrencia(amb, meses_ab)
+
+            # Tabla 1: recurrencia estacional
+            story.append(Paragraph("1. Recurrencia estacional "
+                                   "(municipios que se queman el mismo mes en varios años)", normal))
+            story.append(Spacer(1, 3))
+            if len(rec_df):
+                filas_r = [["Municipio", "Mes", "Años recurr.", "Eventos"]]
+                for _, r in rec_df.iterrows():
+                    filas_r.append([str(r["Municipio"]), str(r["Mes"]),
+                                    str(int(r["anios"])), str(int(r["eventos"]))])
+                t1 = Table(filas_r, repeatRows=1, colWidths=[7 * cm, 2 * cm, 2.5 * cm, 2.5 * cm])
+                t1.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3b57")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7),
+                    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cccccc")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+                     [colors.white, colors.HexColor("#f4f6f7")]),
+                    ("TOPPADDING", (0, 0), (-1, -1), 2),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+                story.append(t1)
+            else:
+                story.append(Paragraph("(Sin recurrencia detectable en el periodo)", small))
+            story.append(Spacer(1, 10))
+
+            # Mapa de calor
+            story.append(Paragraph("2. Mapa de calor de estacionalidad", normal))
+            story.append(Spacer(1, 3))
+            try:
+                story.append(Image(grafica_heatmap(amb, meses_ab),
+                                   width=13 * cm, height=9.3 * cm))
+            except Exception:
+                pass
+            story.append(PageBreak())
+
+            # Tabla 3: reincidentes
+            story.append(Paragraph("3. Municipios reincidentes "
+                                   "(más años distintos con incendios)", normal))
+            story.append(Spacer(1, 3))
+            filas_re = [["Municipio", "Años activos", "Eventos"]]
+            for _, r in reinc_df.iterrows():
+                filas_re.append([str(r["Municipio"]), str(int(r["anios"])),
+                                 str(int(r["eventos"]))])
+            t3 = Table(filas_re, repeatRows=1, colWidths=[8 * cm, 3 * cm, 3 * cm])
+            t3.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3b57")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cccccc")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+                 [colors.white, colors.HexColor("#f4f6f7")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+            story.append(t3)
+            story.append(Spacer(1, 10))
+
+            # Calendario / distribucion historica por mes
+            story.append(Paragraph("4. Distribución histórica por mes", normal))
+            story.append(Spacer(1, 3))
+            story.append(Image(grafica_calendario(amb, meses_ab),
+                               width=11 * cm, height=7 * cm))
+
     story.append(PageBreak())
 
     # --- Tabla de principales eventos (top 20 por area) ---
@@ -425,23 +560,54 @@ def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
     story.append(tbl)
     story.append(Spacer(1, 16))
 
-    # --- Pie: descargo de responsabilidad, autoria y creditos ---
+    # --- Pie: terminos de uso, autoria, creditos y cita ---
     just = ParagraphStyle("just", parent=normal, fontSize=8,
                           textColor=colors.HexColor("#444444"), alignment=4,
                           leading=10)
     pie = ParagraphStyle("pie", parent=normal, fontSize=8,
                          textColor=colors.HexColor("#444444"), leading=10)
-    story.append(Paragraph("<b>Descargo de responsabilidad</b>", h2))
+    story.append(PageBreak())
+    story.append(Paragraph("<b>Términos de uso</b>", h2))
     story.append(Spacer(1, 3))
     story.append(Paragraph(
-        "La UNGRD, a través de la SCR, comparte la siguiente información, "
-        "deslindándose de cualquier responsabilidad sobre el uso que se le dé. "
-        "Los datos presentados han sido generados a partir de información extraída "
-        "de la plataforma WFS de Ororatech. Este visor se suministra con el "
-        "propósito de orientar la toma de decisiones; sin embargo, su correcto uso "
-        "y aplicación son responsabilidad exclusiva de cada persona o entidad "
-        "territorial.", just))
-    story.append(Spacer(1, 8))
+        "Los GeoVisores de la Unidad Nacional para la Gestión del Riesgo de Desastres "
+        "– UNGRD tienen como propósito facilitar al público en general el acceso, "
+        "consulta y visualización de información geográfica y temática relacionada con "
+        "la gestión del riesgo de desastres en Colombia, en sus versiones oficiales más "
+        "recientes.", just))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(
+        "Le solicitamos leer atentamente los presentes términos de uso antes de hacer "
+        "uso de este portal web. La consulta, visualización, descarga o utilización de "
+        "la información contenida en los GeoVisores de la UNGRD implica la aceptación y "
+        "cumplimiento de las siguientes condiciones:", just))
+    story.append(Spacer(1, 4))
+    condiciones = [
+        "Utilizar la información y los contenidos de manera adecuada, responsable y "
+        "conforme a la normatividad vigente.",
+        "Respetar los derechos de autor y citar adecuadamente la fuente de información: "
+        "Unidad Nacional para la Gestión del Riesgo de Desastres – UNGRD y las entidades "
+        "proveedoras de datos cuando corresponda.",
+        "No copiar, modificar, distribuir, comercializar o utilizar con fines indebidos "
+        "la información publicada en los GeoVisores de la UNGRD sin la debida autorización.",
+        "No eliminar, alterar u ocultar avisos, logotipos, marcas, créditos, metadatos o "
+        "cualquier elemento relacionado con la propiedad intelectual de la UNGRD o de las "
+        "entidades aliadas.",
+        "La información publicada tiene carácter informativo y de apoyo para la toma de "
+        "decisiones; su uso e interpretación es responsabilidad exclusiva del usuario.",
+        "La UNGRD no garantiza que la información esté libre de errores o interrupciones y "
+        "podrá actualizar, modificar o retirar contenidos sin previo aviso.",
+        "Queda prohibido incorporar publicidad, alterar la integridad de la información o "
+        "realizar acciones que afecten el funcionamiento, seguridad o disponibilidad de "
+        "los GeoVisores.",
+    ]
+    for c in condiciones:
+        story.append(Paragraph(f"• {c}", just))
+        story.append(Spacer(1, 2))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(
+        "<b>UNIDAD NACIONAL PARA LA GESTIÓN DEL RIESGO DE DESASTRES – UNGRD</b>", pie))
+    story.append(Spacer(1, 10))
     story.append(Paragraph(
         "<b>Realizado por:</b> Jorge Alpala "
         "(jorge.alpala@gestiondelriesgo.gov.co, UNGRD - SCR)<br/>"
@@ -452,6 +618,13 @@ def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
         "Límites: DIVIPOLA - DANE. Desarrollado con Python, Streamlit, "
         "Folium/Leaflet, GeoPandas, Shapely, Pandas, Altair, Matplotlib y "
         "ReportLab. Mapas base: OpenStreetMap · CARTO.", pie))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "<b>Cómo citar:</b> Alpala, J. (2026). <i>Incendios Forestales – Colombia: "
+        "GeoVisor de monitoreo y análisis de incendios con datos de WildFire Solution "
+        "(OroraTech)</i>. Unidad Nacional para la Gestión del Riesgo de Desastres "
+        "(UNGRD), Subdirección para el Conocimiento del Riesgo. "
+        "https://incendios-colombia-wfs.streamlit.app", pie))
 
     doc.build(story)
     buf.seek(0)
