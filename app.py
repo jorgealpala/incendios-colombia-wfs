@@ -73,14 +73,37 @@ def cat_confidence(v):
 @st.cache_data(show_spinner="Cargando incendios...")
 def cargar_incendios():
     df = pd.read_parquet(F_PARQUET) if F_PARQUET.exists() else pd.read_csv(F_CSV)
-    df["cat"] = df["confidence"].apply(cat_confidence) if "confidence" in df.columns else "Sin dato"
+    # --- Optimizacion de memoria: descartar columnas que el dashboard no usa ---
+    cols_descartar = ["algorithms", "newest_acquisition", "sub_area_name",
+                      "cod_depto", "Depto", "type_string", "cause_string"]
+    df = df.drop(columns=[c for c in cols_descartar if c in df.columns], errors="ignore")
+    # Categoria de confianza (vectorizado, sin apply fila a fila)
+    if "confidence" in df.columns:
+        df["cat"] = df["confidence"].round(1).map(lambda v: f"{v:.1f}" if pd.notna(v) else "Sin dato")
+    else:
+        df["cat"] = "Sin dato"
     # Fecha del incendio = oldest_acquisition (inicio); fallback a oldest_detection
     campo_fecha = "oldest_acquisition" if "oldest_acquisition" in df.columns else "oldest_detection"
     df["fecha"] = pd.to_datetime(df[campo_fecha], errors="coerce", utc=True)
-    df["mes"] = df["fecha"].dt.month
+    df["mes"] = df["fecha"].dt.month.astype("Int16")
+    # --- Tipos livianos: texto repetido -> category, enteros mas pequeños ---
+    # NOTA: departamento y municipio se dejan como texto (no category) porque
+    # se usan en muchos groupby y concatenaciones; category causaria grupos
+    # fantasma (conteo 0) y errores de concatenacion.
+    for c in ["fire_confidence", "cod_muni", "archivo_origen"]:
+        if c in df.columns:
+            df[c] = df[c].astype("category")
+    for c in ["num_fires", "lifetime"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int32")
+    for c in ["lon", "lat", "area", "confidence"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("float32")
     return df
 
-@st.cache_data(show_spinner="Cargando mapa base...")
+# GeoJSON cacheados como RECURSO: se cargan una sola vez y se comparten entre
+# todas las sesiones de usuario (no se duplican por visitante => menos memoria).
+@st.cache_resource(show_spinner="Cargando mapa base...")
 def cargar_geojson(ruta):
     with open(ruta, encoding="utf-8") as f:
         return json.load(f)
@@ -641,7 +664,7 @@ if nivel != "Municipal":
                .agg(anios=("anio", "nunique"), eventos=("id", "size")).reset_index())
         rec = rec[rec["anios"] >= 2]
         if len(rec):
-            rec["Municipio"] = rec["municipio"] + " (" + rec["departamento"] + ")"
+            rec["Municipio"] = rec["municipio"].astype(str) + " (" + rec["departamento"].astype(str) + ")"
             rec["Mes"] = rec["mes"].map(MESES_AB)
             rec = rec.sort_values(["anios", "eventos"], ascending=False)
             tabla_rec = (rec[["Municipio", "Mes", "anios", "eventos"]]
@@ -659,12 +682,12 @@ if nivel != "Municipal":
                    "Revela las ventanas de riesgo de cada territorio.")
         top_munis = (amb.groupby(["departamento", "municipio"]).size()
                      .sort_values(ascending=False).head(15).reset_index())
-        top_munis["Municipio"] = top_munis["municipio"] + " (" + top_munis["departamento"] + ")"
+        top_munis["Municipio"] = top_munis["municipio"].astype(str) + " (" + top_munis["departamento"].astype(str) + ")"
         nombres_top = set(zip(top_munis["departamento"], top_munis["municipio"]))
         mask_top = amb.set_index(["departamento", "municipio"]).index.isin(nombres_top)
         heat = amb[mask_top].copy()
         if len(heat):
-            heat["Municipio"] = heat["municipio"] + " (" + heat["departamento"] + ")"
+            heat["Municipio"] = heat["municipio"].astype(str) + " (" + heat["departamento"].astype(str) + ")"
             heat_g = heat.groupby(["Municipio", "mes"]).size().reset_index(name="eventos")
             heat_g["Mes"] = heat_g["mes"].map(MESES_AB)
             orden_muni = top_munis["Municipio"].tolist()
@@ -683,7 +706,7 @@ if nivel != "Municipal":
             st.caption("M\u00e1s a\u00f1os distintos con incendios = vigilancia prioritaria.")
             reinc = (amb.groupby(["departamento", "municipio"])
                      .agg(anios=("anio", "nunique"), eventos=("id", "size")).reset_index())
-            reinc["Municipio"] = reinc["municipio"] + " (" + reinc["departamento"] + ")"
+            reinc["Municipio"] = reinc["municipio"].astype(str) + " (" + reinc["departamento"].astype(str) + ")"
             reinc = reinc.sort_values(["anios", "eventos"], ascending=False)
             tabla_reinc = (reinc[["Municipio", "anios", "eventos"]]
                            .rename(columns={"anios": "A\u00f1os activos", "eventos": "Eventos"})
