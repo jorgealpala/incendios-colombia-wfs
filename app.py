@@ -152,7 +152,7 @@ sel_anio = st.sidebar.selectbox(
 if sel_anio == "Todos los años":
     # Rango por defecto institucional: 01/01/2024 a 31/05/2026,
     # siempre acotado a lo que realmente exista en los datos.
-    ini_def = max(dt.date(2024, 1, 1), fmin_d)
+    ini_def = max(dt.date(2023, 1, 1), fmin_d)
     fin_def = min(dt.date(2026, 5, 31), fmax_d)
     if ini_def > fin_def:        # por si los datos no alcanzan ese rango
         ini_def, fin_def = fmin_d, fmax_d
