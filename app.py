@@ -391,6 +391,22 @@ if nivel == "Nacional":
         help="Jenks: agrupa por saltos naturales en los datos (mejor para explorar). "
              "Rangos técnicos: umbrales fijos de alerta, comparables en el tiempo. "
              "Cuantiles: reparte los departamentos en grupos del mismo tamaño.")
+    # Descripcion del metodo, justo debajo del selector (donde el usuario mira)
+    explica_metodo = {
+        "Cortes naturales (Jenks)":
+            "Agrupa los departamentos buscando los saltos naturales en los datos. "
+            "Refleja bien la estructura real cuando hay pocos departamentos con mucha "
+            "actividad y muchos con poca. Ideal para explorar la situación de un periodo.",
+        "Rangos técnicos (alerta)":
+            "Usa umbrales fijos de alerta (Bajo, Moderado, Alto, Muy alto, Crítico). "
+            "Como no cambian, permiten comparar el mapa entre distintas fechas. "
+            "Ideal para seguimiento institucional en el tiempo.",
+        "Cuantiles":
+            "Reparte los departamentos en grupos del mismo tamaño. Útil para un reparto "
+            "parejo, aunque puede juntar en una clase a departamentos muy distintos.",
+    }.get(metodo_clas, "")
+    if explica_metodo:
+        st.caption(explica_metodo)
 
     cortes = calcular_cortes(vals, metodo_clas)
     # folium exige bins crecientes que cubran min..max y al menos 3 cortes
@@ -416,7 +432,7 @@ if nivel == "Nacional":
                                                  aliases=["Departamento:"], sticky=True)).add_to(m)
     salida = st_folium(m, width=None, height=620, returned_objects=["last_active_drawing"])
 
-    # Leyenda propia de clases, adaptada al metodo
+    # Leyenda de colores (clases): debajo del mapa, junto a los colores
     paleta = ["#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026", "#7a0019"]
     es_tecnico = metodo_clas == "Rangos técnicos (alerta)"
     if usa_bins and len(cortes) >= 3:
@@ -437,24 +453,9 @@ if nivel == "Nacional":
         nombre_metodo = {"Cortes naturales (Jenks)": "cortes naturales (Jenks)",
                          "Rangos técnicos (alerta)": "rangos técnicos de alerta",
                          "Cuantiles": "cuantiles"}.get(metodo_clas, metodo_clas)
-        explica_metodo = {
-            "Cortes naturales (Jenks)":
-                "Agrupa los departamentos buscando los saltos naturales en los datos. "
-                "Refleja bien la estructura real cuando hay pocos departamentos con mucha "
-                "actividad y muchos con poca. Ideal para explorar la situación de un periodo.",
-            "Rangos técnicos (alerta)":
-                "Usa umbrales fijos de alerta (Bajo, Moderado, Alto, Muy alto, Crítico). "
-                "Como no cambian, permiten comparar el mapa entre distintas fechas. "
-                "Ideal para seguimiento institucional en el tiempo.",
-            "Cuantiles":
-                "Reparte los departamentos en grupos del mismo tamaño. Útil para un reparto "
-                "parejo, aunque puede juntar en una clase a departamentos muy distintos.",
-        }.get(metodo_clas, "")
         st.markdown(
             f"<div style='margin-top:-8px;'><b>Número total de eventos registrados</b> · "
             f"{nombre_metodo}<br>" + "".join(items) + "</div>", unsafe_allow_html=True)
-        if explica_metodo:
-            st.caption(explica_metodo)
     if salida and salida.get("last_active_drawing"):
         clic = salida["last_active_drawing"].get("properties", {}).get("DeNombre")
         if clic and clic in deptos_disponibles:
