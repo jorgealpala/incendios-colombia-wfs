@@ -47,8 +47,8 @@ def _fig_a_buffer(fig):
     return buf
 
 
-def mapa_nacional(gdf_deptos, conteo_por_depto):
-    """Coropletico de departamentos por numero de eventos (clases por cuantiles)."""
+def mapa_nacional(gdf_deptos, conteo_por_depto, metodo="jenks"):
+    """Coropletico de departamentos por numero de eventos, segun el metodo elegido."""
     import numpy as np
     import matplotlib.colors as mcolors
     fig, ax = plt.subplots(figsize=(6.5, 6.5))
@@ -56,10 +56,12 @@ def mapa_nacional(gdf_deptos, conteo_por_depto):
     g["eventos"] = g["DeNombre"].map(conteo_por_depto).fillna(0)
     cmap = LinearSegmentedColormap.from_list("fuego", ["#ffffcc", "#fd8d3c", "#bd0026"])
     vals = g["eventos"].values
-    # Cortes por cuantiles (5 clases); si no hay suficiente variedad, escala lineal
+    nombre_metodo = {"jenks": "cortes naturales (Jenks)",
+                     "tecnicos": "rangos técnicos de alerta",
+                     "cuantiles": "cuantiles"}.get(metodo, metodo)
     try:
-        cortes = np.unique(np.quantile(vals, [0, 0.2, 0.4, 0.6, 0.8, 1.0]))
-        if len(cortes) >= 3:
+        cortes = calcular_cortes(vals, metodo)
+        if len(cortes) >= 3 and cortes[0] <= vals.min() and cortes[-1] >= vals.max():
             norm = mcolors.BoundaryNorm(cortes, cmap.N)
             g.plot(column="eventos", cmap=cmap, norm=norm, linewidth=0.4,
                    edgecolor="#888", ax=ax, legend=True,
@@ -70,7 +72,7 @@ def mapa_nacional(gdf_deptos, conteo_por_depto):
     except Exception:
         g.plot(column="eventos", cmap=cmap, linewidth=0.4, edgecolor="#888",
                ax=ax, legend=True, legend_kwds={"label": "Eventos", "shrink": 0.5})
-    ax.set_title("Frecuencia de eventos por departamento (cuantiles)",
+    ax.set_title(f"Frecuencia de eventos por departamento\n({nombre_metodo})",
                  fontsize=11, fontweight="bold")
     ax.axis("off")
     return _fig_a_buffer(fig)
@@ -117,6 +119,61 @@ PALETA_ANIOS = ["#27ae60", "#2980b9", "#e74c3c", "#8e44ad", "#f39c12",
                 "#e67e22", "#1abc9c"]
 COLOR_ANIO = {a: PALETA_ANIOS[i % len(PALETA_ANIOS)]
               for i, a in enumerate(range(2019, 2031))}
+
+# --- Clasificacion del mapa nacional (consistente con el dashboard) ---
+RANGOS_TECNICOS = [0, 100, 500, 1500, 4000, 8000]
+ETIQUETAS_ALERTA = ["Bajo", "Moderado", "Alto", "Muy alto", "Crítico"]
+
+def jenks_breaks(valores, n_clases=5):
+    """Cortes naturales de Jenks (Fisher-Jenks) en NumPy puro."""
+    import numpy as np
+    v = np.sort(np.asarray(valores, dtype=float))
+    n = len(v)
+    if n <= n_clases:
+        return list(np.unique(v))
+    mat1 = np.zeros((n + 1, n_clases + 1))
+    mat2 = np.full((n + 1, n_clases + 1), np.inf)
+    mat1[1:, 1] = 1
+    mat2[1, 1:] = 0
+    var = 0.0
+    for l in range(2, n + 1):
+        s1 = s2 = w = 0.0
+        for m in range(1, l + 1):
+            i3 = l - m + 1
+            val = v[i3 - 1]
+            s2 += val * val; s1 += val; w += 1
+            var = s2 - (s1 * s1) / w
+            i4 = i3 - 1
+            if i4 != 0:
+                for j in range(2, n_clases + 1):
+                    if mat2[l, j] >= var + mat2[i4, j - 1]:
+                        mat1[l, j] = i3
+                        mat2[l, j] = var + mat2[i4, j - 1]
+        mat1[l, 1] = 1
+        mat2[l, 1] = var
+    k = n
+    kclass = [0.0] * (n_clases + 1)
+    kclass[n_clases] = v[-1]
+    kclass[0] = v[0]
+    for j in range(n_clases, 1, -1):
+        idx = int(mat1[k, j]) - 2
+        kclass[j - 1] = v[idx]
+        k = int(mat1[k, j]) - 1
+    return kclass
+
+def calcular_cortes(vals, metodo):
+    """Cortes segun metodo: 'jenks', 'tecnicos' o 'cuantiles'."""
+    import numpy as np
+    vmin, vmax = float(vals.min()), float(vals.max())
+    if metodo == "tecnicos":
+        cortes = [c for c in RANGOS_TECNICOS if c < vmax]
+        cortes = cortes + [vmax] if (not cortes or cortes[-1] < vmax) else cortes
+        if cortes[0] > vmin:
+            cortes = [vmin] + cortes
+        return [float(c) for c in sorted(set(cortes))]
+    if metodo == "jenks":
+        return [float(c) for c in np.unique(jenks_breaks(vals, 5))]
+    return [float(c) for c in np.unique(np.quantile(vals, [0, 0.2, 0.4, 0.6, 0.8, 1.0]))]
 
 
 def grafica_meses(datos):
@@ -166,37 +223,44 @@ def grafica_diaria(datos):
 
 
 def grafica_anios(resumen, valor="eventos"):
-    """Barras por año (eventos o área), coloreadas con el color fijo de cada año."""
+    """Barras por año (eventos o área) con variacion % y color fijo por año."""
     fig, ax = plt.subplots(figsize=(5.0, 3.2))
     colores = [COLOR_ANIO.get(int(a), "#888") for a in resumen["anio"]]
+    etiquetas = resumen["anio_str"] if "anio_str" in resumen.columns else resumen["anio"].astype(str)
     if valor == "eventos":
-        ax.bar(resumen["anio"].astype(str), resumen["eventos"], color=colores)
+        ax.bar(etiquetas, resumen["eventos"], color=colores)
         ax.set_ylabel("Eventos")
         ax.set_title("Eventos por año", fontsize=11, fontweight="bold")
-        # Etiqueta de variacion %
         for i, (_, r) in enumerate(resumen.iterrows()):
             if pd.notna(r.get("var_pct")):
                 col = "#c0392b" if r["var_pct"] >= 0 else "#27ae60"
                 ax.text(i, r["eventos"], f"{r['var_pct']:+.0f}%", ha="center",
                         va="bottom", fontsize=8, fontweight="bold", color=col)
     else:
-        ax.bar(resumen["anio"].astype(str), resumen["area"], color=colores)
+        ax.bar(etiquetas, resumen["area"], color=colores)
         ax.set_ylabel("Área (ha)")
         ax.set_title("Área quemada por año", fontsize=11, fontweight="bold")
+        for i, (_, r) in enumerate(resumen.iterrows()):
+            if pd.notna(r.get("var_pct_area")):
+                col = "#c0392b" if r["var_pct_area"] >= 0 else "#27ae60"
+                ax.text(i, r["area"], f"{r['var_pct_area']:+.0f}%", ha="center",
+                        va="bottom", fontsize=8, fontweight="bold", color=col)
+    ax.tick_params(axis="x", labelsize=8)
     ax.spines[["top", "right"]].set_visible(False)
     return _fig_a_buffer(fig)
 
 
 def torta_anios(resumen, valor="eventos"):
-    """Torta (dona) de eventos o área por año, con color fijo por año."""
+    """Torta (dona) de eventos o área por año, con % y color fijo por año."""
     fig, ax = plt.subplots(figsize=(3.4, 3.4))
     colores = [COLOR_ANIO.get(int(a), "#888") for a in resumen["anio"]]
     vals = resumen[valor].values
-    etiquetas = resumen["anio"].astype(str).values
+    etiquetas = (resumen["anio_str"].values if "anio_str" in resumen.columns
+                 else resumen["anio"].astype(str).values)
     if vals.sum() > 0:
         ax.pie(vals, labels=etiquetas, colors=colores, autopct="%1.0f%%",
                startangle=90, wedgeprops=dict(width=0.45), textprops={"fontsize": 8})
-    titulo = "Eventos por año" if valor == "eventos" else "Área por año"
+    titulo = "Eventos por año (%)" if valor == "eventos" else "Área por año (%)"
     ax.set_title(titulo, fontsize=10, fontweight="bold")
     return _fig_a_buffer(fig)
 
@@ -280,7 +344,7 @@ def tabla_recurrencia(amb, meses_ab):
 # ----------------------------------------------------------------------
 def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
                 gdf_deptos=None, gdf_limite=None, conteo_por_depto=None,
-                ruta_logo=None):
+                ruta_logo=None, metodo_clasificacion="jenks", fecha_corte=None):
     """
     Devuelve los bytes de un PDF con el reporte.
       datos          : DataFrame ya filtrado (nivel + periodo + confianza)
@@ -371,7 +435,7 @@ def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
     story.append(Paragraph("Mapa", h2))
     try:
         if nivel == "Nacional" and gdf_deptos is not None:
-            img_buf = mapa_nacional(gdf_deptos, conteo_por_depto or {})
+            img_buf = mapa_nacional(gdf_deptos, conteo_por_depto or {}, metodo_clasificacion)
         else:
             img_buf = mapa_puntos(gdf_limite, datos.dropna(subset=["lat", "lon"]),
                                   f"Incendios · {titulo_zona}")
@@ -405,9 +469,28 @@ def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
                    .agg(eventos=("id", "size"), area=("area", "sum"))
                    .reset_index().sort_values("anio"))
         resumen["var_pct"] = resumen["eventos"].pct_change() * 100
+        resumen["var_pct_area"] = resumen["area"].pct_change() * 100
+        # Año "parcial": el año donde termina el dataset completo, si no llega a
+        # diciembre. Usa fecha_corte (global); si no se pasa, cae al maximo local.
+        if fecha_corte is not None and pd.notna(fecha_corte):
+            anio_corte = fecha_corte.year
+            mes_corte = fecha_corte.month
+        else:
+            anio_corte = int(resumen["anio"].max())
+            mes_corte = int(serie_anual[serie_anual["anio"] == anio_corte]["fecha"].dt.month.max())
+        corte_parcial = mes_corte < 12
+        resumen["anio_str"] = resumen["anio"].apply(
+            lambda a: f"{int(a)} parcial"
+            if (int(a) == anio_corte and corte_parcial) else str(int(a)))
+        es_parcial = corte_parcial and anio_corte in resumen["anio"].values
 
         story.append(PageBreak())
         story.append(Paragraph("Análisis comparativo por año", h2))
+        if es_parcial:
+            story.append(Paragraph(
+                f"Nota: {anio_corte} es un periodo parcial (los datos llegan hasta el "
+                f"mes {mes_corte:02d}); su comparación con años completos es solo "
+                "referencial.", small))
         story.append(Spacer(1, 6))
         # Tortas lado a lado (eventos y area)
         t_ev = torta_anios(resumen, "eventos")
@@ -426,8 +509,8 @@ def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
                             width=11 * cm, height=7 * cm))
 
     # --- Tops segun nivel (al final del analisis) ---
-    story.append(PageBreak())
     if nivel == "Nacional":
+        story.append(PageBreak())
         story.append(Image(grafica_top(datos, "departamento",
                      "Top 10 departamentos por eventos"), width=11 * cm, height=7.5 * cm))
         story.append(Spacer(1, 8))
@@ -435,6 +518,7 @@ def generar_pdf(datos, nivel, titulo_zona, periodo, cats_presentes,
                      "Top 10 departamentos por área", por_area=True),
                      width=11 * cm, height=7.5 * cm))
     elif nivel == "Departamental":
+        story.append(PageBreak())
         story.append(Image(grafica_top(datos, "municipio",
                      "Top 10 municipios por eventos"), width=11 * cm, height=7.5 * cm))
         story.append(Spacer(1, 8))

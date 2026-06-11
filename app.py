@@ -65,6 +65,65 @@ def escala_color_anios(anios):
     rng = [COLOR_ANIO.get(int(a), "#95a5a6") for a in sorted(anios)]
     return dom, rng
 
+# --- Clasificacion del mapa nacional: rangos tecnicos y Jenks ---
+# Umbrales tecnicos (niveles de alerta) definidos con criterio institucional.
+RANGOS_TECNICOS = [0, 100, 500, 1500, 4000, 8000]
+ETIQUETAS_ALERTA = ["Bajo", "Moderado", "Alto", "Muy alto", "Crítico"]
+
+def jenks_breaks(valores, n_clases=5):
+    """Cortes naturales de Jenks (Fisher-Jenks) en NumPy puro, sin dependencias."""
+    import numpy as np
+    v = np.sort(np.asarray(valores, dtype=float))
+    n = len(v)
+    if n <= n_clases:
+        return list(np.unique(v))
+    mat1 = np.zeros((n + 1, n_clases + 1))
+    mat2 = np.full((n + 1, n_clases + 1), np.inf)
+    mat1[1:, 1] = 1
+    mat2[1, 1:] = 0
+    var = 0.0
+    for l in range(2, n + 1):
+        s1 = s2 = w = 0.0
+        for m in range(1, l + 1):
+            i3 = l - m + 1
+            val = v[i3 - 1]
+            s2 += val * val; s1 += val; w += 1
+            var = s2 - (s1 * s1) / w
+            i4 = i3 - 1
+            if i4 != 0:
+                for j in range(2, n_clases + 1):
+                    if mat2[l, j] >= var + mat2[i4, j - 1]:
+                        mat1[l, j] = i3
+                        mat2[l, j] = var + mat2[i4, j - 1]
+        mat1[l, 1] = 1
+        mat2[l, 1] = var
+    k = n
+    kclass = [0.0] * (n_clases + 1)
+    kclass[n_clases] = v[-1]
+    kclass[0] = v[0]
+    for j in range(n_clases, 1, -1):
+        idx = int(mat1[k, j]) - 2
+        kclass[j - 1] = v[idx]
+        k = int(mat1[k, j]) - 1
+    return kclass
+
+def calcular_cortes(vals, metodo):
+    """Devuelve la lista de cortes segun el metodo elegido."""
+    import numpy as np
+    vmin, vmax = float(vals.min()), float(vals.max())
+    if metodo == "Rangos técnicos (alerta)":
+        # Recortar los umbrales al rango real para que folium no falle
+        cortes = [c for c in RANGOS_TECNICOS if c < vmax]
+        cortes = cortes + [vmax] if cortes[-1] < vmax else cortes
+        if cortes[0] > vmin:
+            cortes = [vmin] + cortes
+        return [float(c) for c in sorted(set(cortes))]
+    if metodo == "Cortes naturales (Jenks)":
+        cortes = jenks_breaks(vals, 5)
+        return [float(c) for c in np.unique(cortes)]
+    # Cuantiles (por defecto de respaldo)
+    return [float(c) for c in np.unique(np.quantile(vals, [0, 0.2, 0.4, 0.6, 0.8, 1.0]))]
+
 def cat_confidence(v):
     if v is None or pd.isna(v):
         return "Sin dato"
@@ -218,6 +277,20 @@ if nivel == "Municipal" and st.session_state.departamento:
 # ============ FILTRO DE CONFIANZA (solo confidence) ============
 st.sidebar.divider()
 st.sidebar.subheader("Confianza del incendio")
+st.sidebar.caption(
+    "La confianza indica cuántos satélites y algoritmos detectaron la fuente de "
+    "calor. A mayor confianza, detección más precisa.")
+with st.sidebar.expander("¿Qué significa cada valor?"):
+    st.markdown(
+        "| Confianza | Satélites | Algoritmos |\n"
+        "|:--:|:--:|:--:|\n"
+        "| 0.2 | 1 | 1 |\n"
+        "| 0.4 | 2 | 2 |\n"
+        "| 0.6 | 3 | 3 |\n"
+        "| 0.8 | 4 | 4 |\n"
+        "| 1.0 | 5 | 5 |\n")
+    st.caption("Fuente: WildFire Solution – OroraTech. "
+               "El valor 0.0 corresponde a detecciones con datos insuficientes.")
 cats_presentes = [c for c in ORDEN_CONF if c in df["cat"].unique()]
 mostrar_insuf = st.sidebar.checkbox("Mostrar incidentes con datos insuficientes", value=False)
 cats_filtrables = [c for c in cats_presentes if c != "0.0"]
@@ -247,6 +320,9 @@ alcance = st.sidebar.radio(
     help="'Vista actual' usa el nivel y filtros en pantalla. "
          "'Nacional completo' genera un resumen de todo el país.")
 generar_clic = st.sidebar.button("Generar reporte PDF", width="stretch")
+st.sidebar.caption(
+    "Tras generarlo, el botón **⬇️ Descargar reporte PDF** aparece al final del "
+    "dashboard, debajo de la tabla de eventos. Haz clic allí para descargarlo.")
 
 # ============ ENCABEZADO + KPIs ============
 # Logo institucional + titulo (logo a la izquierda del titulo)
@@ -306,19 +382,29 @@ if nivel == "Nacional":
     conteo = conteo.reindex(nombres_geo).fillna(0)
     import numpy as np
     vals = conteo.values
-    cortes_np = np.unique(np.quantile(vals, [0, 0.2, 0.4, 0.6, 0.8, 1.0]))
-    cortes = [float(c) for c in cortes_np]
-    usa_cuantiles = len(cortes) >= 3 and cortes[0] <= vals.min() and cortes[-1] >= vals.max()
+
+    # Selector de metodo de clasificacion (Jenks por defecto)
+    metodo_clas = st.radio(
+        "Método de clasificación del mapa",
+        ["Cortes naturales (Jenks)", "Rangos técnicos (alerta)", "Cuantiles"],
+        horizontal=True,
+        help="Jenks: agrupa por saltos naturales en los datos (mejor para explorar). "
+             "Rangos técnicos: umbrales fijos de alerta, comparables en el tiempo. "
+             "Cuantiles: reparte los departamentos en grupos del mismo tamaño.")
+
+    cortes = calcular_cortes(vals, metodo_clas)
+    # folium exige bins crecientes que cubran min..max y al menos 3 cortes
+    usa_bins = (len(cortes) >= 3 and cortes[0] <= vals.min() and cortes[-1] >= vals.max())
+
     m = folium.Map(location=[4.6, -74.1], zoom_start=5, tiles="cartodbpositron")
     choro = folium.Choropleth(
         geo_data=gj_deptos, data=conteo,
         key_on="feature.properties.DeNombre",
         fill_color="YlOrRd", fill_opacity=0.7, line_opacity=0.3,
         nan_fill_color="#eeeeee",
-        bins=cortes if usa_cuantiles else 6,
+        bins=cortes if usa_bins else 6,
         legend_name="Frecuencia (total eventos)")
     choro.add_to(m)
-    # Quitar la leyenda automatica de folium (se encima); usamos una propia debajo
     for key in list(choro._children.keys()):
         if key.startswith("color_map"):
             del choro._children[key]
@@ -329,21 +415,46 @@ if nivel == "Nacional":
                    tooltip=folium.GeoJsonTooltip(fields=["DeNombre"],
                                                  aliases=["Departamento:"], sticky=True)).add_to(m)
     salida = st_folium(m, width=None, height=620, returned_objects=["last_active_drawing"])
-    # Leyenda propia de clases (legible, sin encimar etiquetas)
+
+    # Leyenda propia de clases, adaptada al metodo
     paleta = ["#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026", "#7a0019"]
-    if usa_cuantiles and len(cortes) >= 3:
+    es_tecnico = metodo_clas == "Rangos técnicos (alerta)"
+    if usa_bins and len(cortes) >= 3:
         items = []
         for i in range(len(cortes) - 1):
             ini, fin = cortes[i], cortes[i + 1]
             col = paleta[i] if i < len(paleta) else paleta[-1]
+            if es_tecnico and i < len(ETIQUETAS_ALERTA):
+                txt = f"{ETIQUETAS_ALERTA[i]} ({ini:,.0f}–{fin:,.0f})"
+            else:
+                txt = f"{ini:,.0f} – {fin:,.0f}"
             items.append(
-                f"<span style='display:inline-flex;align-items:center;margin-right:14px;'>"
+                f"<span style='display:inline-flex;align-items:center;margin-right:14px;"
+                f"margin-bottom:4px;'>"
                 f"<span style='width:16px;height:16px;background:{col};"
                 f"border:1px solid #ccc;border-radius:3px;margin-right:5px;'></span>"
-                f"{ini:,.0f} – {fin:,.0f}</span>")
+                f"{txt}</span>")
+        nombre_metodo = {"Cortes naturales (Jenks)": "cortes naturales (Jenks)",
+                         "Rangos técnicos (alerta)": "rangos técnicos de alerta",
+                         "Cuantiles": "cuantiles"}.get(metodo_clas, metodo_clas)
+        explica_metodo = {
+            "Cortes naturales (Jenks)":
+                "Agrupa los departamentos buscando los saltos naturales en los datos. "
+                "Refleja bien la estructura real cuando hay pocos departamentos con mucha "
+                "actividad y muchos con poca. Ideal para explorar la situación de un periodo.",
+            "Rangos técnicos (alerta)":
+                "Usa umbrales fijos de alerta (Bajo, Moderado, Alto, Muy alto, Crítico). "
+                "Como no cambian, permiten comparar el mapa entre distintas fechas. "
+                "Ideal para seguimiento institucional en el tiempo.",
+            "Cuantiles":
+                "Reparte los departamentos en grupos del mismo tamaño. Útil para un reparto "
+                "parejo, aunque puede juntar en una clase a departamentos muy distintos.",
+        }.get(metodo_clas, "")
         st.markdown(
-            "<div style='margin-top:-8px;'><b>Frecuencia (total eventos)</b> · clases por cuantiles<br>"
-            + "".join(items) + "</div>", unsafe_allow_html=True)
+            f"<div style='margin-top:-8px;'><b>Número total de eventos registrados</b> · "
+            f"{nombre_metodo}<br>" + "".join(items) + "</div>", unsafe_allow_html=True)
+        if explica_metodo:
+            st.caption(explica_metodo)
     if salida and salida.get("last_active_drawing"):
         clic = salida["last_active_drawing"].get("properties", {}).get("DeNombre")
         if clic and clic in deptos_disponibles:
@@ -402,21 +513,86 @@ elif nivel == "Departamental":
     st.caption("Densidad de incendios. Se etiquetan los municipios con más eventos; "
                "pasa el cursor sobre cualquiera para ver su nombre.")
     salida = st_folium(m, width=None, height=620)
+    # Leyenda del mapa de calor: gradiente azul (baja) -> rojo (alta concentracion)
+    st.markdown(
+        "<div style='font-size:13px;color:#444;'><b>Densidad de incendios</b>: "
+        "concentración de eventos por zona "
+        "<span style='display:inline-block;width:130px;height:13px;vertical-align:middle;"
+        "border:1px solid #ccc;border-radius:3px;margin:0 6px;"
+        "background:linear-gradient(to right,#2b3abb,#00d0ff,#33ff66,#ffff33,#ff3300);'>"
+        "</span> "
+        "<span style='color:#2b3abb;'>baja</span> → "
+        "<span style='color:#ff3300;'>alta</span></div>",
+        unsafe_allow_html=True)
 
 else:  # Municipal
     sub = datos.dropna(subset=["lat", "lon"])
     centro = [sub["lat"].mean(), sub["lon"].mean()] if len(sub) else [4.6, -74.1]
+
+    # El usuario elige como visualizar los incendios del municipio
+    modo_vis = st.radio(
+        "Forma de visualización",
+        ["Puntos agrupados", "Solo puntos", "Mapa de calor"],
+        horizontal=True,
+        help="Puntos agrupados: agrupa en clústeres al alejar (recomendado si hay "
+             "muchos). Solo puntos: muestra cada incendio sin agrupar. "
+             "Mapa de calor: densidad de concentración.")
+
     m = folium.Map(location=centro, zoom_start=11, tiles="cartodbpositron")
     contorno_muni(st.session_state.municipio).add_to(m)
-    for _, r in sub.iterrows():
-        color = COLOR_CONF.get(r["cat"], "#95a5a6")
-        radio = 4 + (r["area"] ** 0.5) / 4 if pd.notna(r["area"]) else 4
-        folium.CircleMarker(location=[r["lat"], r["lon"]], radius=radio,
-                            color=color, fill=True, fill_color=color, fill_opacity=0.7, weight=1,
-                            tooltip=(f"ID {r['id']} · conf {r['cat']} · {r['area']:.1f} ha"
-                                     if pd.notna(r['area']) else f"ID {r['id']} · conf {r['cat']}")).add_to(m)
-    st.caption("El contorno marca el límite del municipio.")
-    salida = st_folium(m, width=None, height=620)
+
+    if modo_vis == "Mapa de calor":
+        if len(sub):
+            HeatMap(sub[["lat", "lon"]].values.tolist(), radius=12, blur=18,
+                    min_opacity=0.3).add_to(m)
+        st.caption("Densidad de incendios en el municipio.")
+        salida = st_folium(m, width=None, height=620)
+        st.markdown(
+            "<div style='font-size:13px;color:#444;'><b>Densidad de incendios</b>: "
+            "concentración de eventos por zona "
+            "<span style='display:inline-block;width:130px;height:13px;vertical-align:middle;"
+            "border:1px solid #ccc;border-radius:3px;margin:0 6px;"
+            "background:linear-gradient(to right,#2b3abb,#00d0ff,#33ff66,#ffff33,#ff3300);'>"
+            "</span> <span style='color:#2b3abb;'>baja</span> → "
+            "<span style='color:#ff3300;'>alta</span></div>", unsafe_allow_html=True)
+    else:
+        # Puntos (agrupados o no)
+        agrupar = (modo_vis == "Puntos agrupados") and len(sub) > 0
+        if agrupar:
+            from folium.plugins import MarkerCluster
+            contenedor = MarkerCluster(name="incendios").add_to(m)
+        else:
+            contenedor = m
+        for _, r in sub.iterrows():
+            color = COLOR_CONF.get(r["cat"], "#95a5a6")
+            radio = 4 + (r["area"] ** 0.5) / 4 if pd.notna(r["area"]) else 4
+            folium.CircleMarker(
+                location=[r["lat"], r["lon"]], radius=radio,
+                color=color, fill=True, fill_color=color, fill_opacity=0.7, weight=1,
+                tooltip=(f"Confianza: {r['cat']} · Área: {r['area']:.1f} ha · "
+                         f"Focos: {int(r['num_fires']) if pd.notna(r.get('num_fires')) else '-'}"
+                         if pd.notna(r['area']) else f"Confianza: {r['cat']}")
+            ).add_to(contenedor)
+        cap = "El contorno marca el límite del municipio."
+        if agrupar:
+            cap += (" Los puntos se agrupan en círculos numerados; acércate con el zoom "
+                    "para ver los incendios individuales.")
+        st.caption(cap)
+        salida = st_folium(m, width=None, height=620)
+        # Leyenda de los puntos: color = confianza, tamaño = área
+        items_conf = "".join(
+            f"<span style='display:inline-flex;align-items:center;margin-right:12px;'>"
+            f"<span style='width:13px;height:13px;border-radius:50%;background:{COLOR_CONF[c]};"
+            f"margin-right:4px;'></span>{ETIQUETAS.get(c, c)}</span>"
+            for c in ORDEN_CONF if c in categorias_visibles)
+        st.markdown(
+            "<div style='font-size:13px;color:#444;'>"
+            "<b>Cada punto es un incendio.</b> El <b>color</b> indica el nivel de confianza "
+            "de la detección; el <b>tamaño</b> es proporcional al área quemada (ha).<br>"
+            "<span style='margin-right:10px;'><b>Confianza:</b></span>" + items_conf +
+            "<br><span style='color:#888;'>Pasa el cursor sobre un punto para ver confianza, "
+            "área y número de focos.</span></div>",
+            unsafe_allow_html=True)
 
 # ============ GRAFICAS: dos por fila, debajo del mapa ============
 st.divider()
@@ -441,10 +617,12 @@ def barras_top(data, campo, titulo, color, valor="eventos"):
 g1, g2 = st.columns(2)
 with g1:
     st.markdown("**Distribución por nivel de confianza**")
-    dist = datos.groupby("cat").size().reindex(cats_presentes).fillna(0).reset_index()
+    # Mostrar SOLO los niveles seleccionados por el usuario (orden canonico)
+    niveles_mostrar = [c for c in ORDEN_CONF if c in categorias_visibles]
+    dist = datos.groupby("cat").size().reindex(niveles_mostrar).fillna(0).reset_index()
     dist.columns = ["nivel", "eventos"]
     ch = (alt.Chart(dist).mark_bar().encode(
-        x=alt.X("nivel:N", sort=cats_presentes, title="Nivel de confianza"),
+        x=alt.X("nivel:N", sort=niveles_mostrar, title="Nivel de confianza"),
         y=alt.Y("eventos:Q", title="Eventos"),
         color=alt.Color("nivel:N", scale=alt.Scale(domain=list(COLOR_CONF.keys()),
                                                     range=list(COLOR_CONF.values())), legend=None),
@@ -539,66 +717,105 @@ if len(serie_anual):
     resumen = (serie_anual.groupby("anio")
                .agg(eventos=("id", "size"), area=("area", "sum"))
                .reset_index().sort_values("anio"))
-    resumen["anio_str"] = resumen["anio"].astype(str)
-    # Variacion % de eventos respecto al año anterior
+    # Un año es "parcial" SOLO si es el año donde termina el dataset completo
+    # (fmax global) y esa fecha de corte es anterior a fin de año. Asi no se
+    # marca parcial un año completo solo porque el FILTRO recorte fechas.
+    anio_corte = fmax.year if pd.notna(fmax) else None
+    mes_corte = fmax.month if pd.notna(fmax) else 12
+    corte_parcial = mes_corte < 12
+    def etq_anio(a):
+        return (f"{int(a)} parcial"
+                if (anio_corte is not None and int(a) == anio_corte and corte_parcial)
+                else str(int(a)))
+    resumen["anio_str"] = resumen["anio"].apply(etq_anio)
+    # ¿Hay algun año parcial visible en este resumen?
+    es_parcial = (anio_corte is not None and corte_parcial
+                  and anio_corte in resumen["anio"].values)
+    # Variacion % respecto al año anterior (eventos y area)
     resumen["var_pct"] = resumen["eventos"].pct_change() * 100
+    resumen["var_pct_area"] = resumen["area"].pct_change() * 100
+    # Porcentaje del total (para etiquetas de las donas)
+    resumen["pct_ev"] = 100 * resumen["eventos"] / resumen["eventos"].sum()
+    resumen["pct_ar"] = 100 * resumen["area"] / resumen["area"].sum()
 
     st.markdown("**Análisis comparativo por año**")
+    if es_parcial:
+        st.caption(f"Nota: {anio_corte} es un periodo parcial (los datos llegan "
+                   f"hasta el mes {mes_corte:02d}); su comparación con años completos "
+                   f"es solo referencial.")
     pa, pb, pc = st.columns(3)
 
-    # Escala de color FIJA por año, igual que en la gráfica de eventos por mes.
-    dom_a, rng_a = escala_color_anios(resumen["anio"].tolist())
-    escala_anio = alt.Scale(domain=dom_a, range=rng_a)
+    # Escala de color FIJA por año (usa la etiqueta, incluida 'parcial')
+    orden_anios = resumen["anio_str"].tolist()
+    rng_a = [COLOR_ANIO.get(int(a), "#95a5a6") for a in resumen["anio"]]
+    escala_anio = alt.Scale(domain=orden_anios, range=rng_a)
 
-    # (a) Tortas: eventos por año y área por año
+    # (a) Tortas con etiqueta de porcentaje por año
     with pa:
-        torta_ev = (alt.Chart(resumen).mark_arc(innerRadius=40).encode(
-            theta=alt.Theta("eventos:Q"),
-            color=alt.Color("anio_str:N", title="Año", scale=escala_anio),
-            tooltip=[alt.Tooltip("anio_str:N", title="Año"),
-                     alt.Tooltip("eventos:Q", title="Eventos", format=",")]
-        ).properties(height=220, title="Eventos por año"))
-        st.altair_chart(torta_ev, width="stretch")
+        st.markdown("<div style='font-size:13px;font-weight:600;text-align:center;'>"
+                    "Eventos por año (%)</div>", unsafe_allow_html=True)
+        base_ev = alt.Chart(resumen).encode(
+            theta=alt.Theta("eventos:Q", stack=True),
+            color=alt.Color("anio_str:N", title="Año", scale=escala_anio,
+                            sort=orden_anios),
+            order=alt.Order("anio:Q"))
+        torta_ev = base_ev.mark_arc(innerRadius=40, outerRadius=85)
+        texto_ev = base_ev.mark_text(radius=102, fontSize=10).encode(
+            text=alt.Text("pct_ev:Q", format=".0f"),
+            color=alt.value("#333"))
+        st.altair_chart((torta_ev + texto_ev).properties(height=240), width="stretch")
 
-        torta_ar = (alt.Chart(resumen).mark_arc(innerRadius=40).encode(
-            theta=alt.Theta("area:Q"),
-            color=alt.Color("anio_str:N", title="Año", scale=escala_anio),
-            tooltip=[alt.Tooltip("anio_str:N", title="Año"),
-                     alt.Tooltip("area:Q", title="Área (ha)", format=",.0f")]
-        ).properties(height=220, title="Área quemada por año"))
-        st.altair_chart(torta_ar, width="stretch")
+        st.markdown("<div style='font-size:13px;font-weight:600;text-align:center;"
+                    "margin-top:6px;'>Área quemada por año (%)</div>",
+                    unsafe_allow_html=True)
+        base_ar = alt.Chart(resumen).encode(
+            theta=alt.Theta("area:Q", stack=True),
+            color=alt.Color("anio_str:N", title="Año", scale=escala_anio,
+                            sort=orden_anios),
+            order=alt.Order("anio:Q"))
+        torta_ar = base_ar.mark_arc(innerRadius=40, outerRadius=85)
+        texto_ar = base_ar.mark_text(radius=102, fontSize=10).encode(
+            text=alt.Text("pct_ar:Q", format=".0f"),
+            color=alt.value("#333"))
+        st.altair_chart((torta_ar + texto_ar).properties(height=240), width="stretch")
 
-    # (b) Barras de eventos por año con variacion % (tendencia)
+    # (b) Barras de eventos por año con variacion %
     with pb:
-        st.caption("Eventos por año y su variación frente al año anterior")
+        st.caption("Eventos por año y su variación porcentual (%) frente al año anterior")
         barras_ev = (alt.Chart(resumen).mark_bar().encode(
-            x=alt.X("anio_str:N", title="Año"),
+            x=alt.X("anio_str:N", title="Año", sort=orden_anios),
             y=alt.Y("eventos:Q", title="Eventos"),
-            color=alt.Color("anio_str:N", scale=escala_anio, legend=None),
+            color=alt.Color("anio_str:N", scale=escala_anio, sort=orden_anios, legend=None),
             tooltip=[alt.Tooltip("anio_str:N", title="Año"),
                      alt.Tooltip("eventos:Q", title="Eventos", format=","),
                      alt.Tooltip("var_pct:Q", title="Var. % vs año anterior", format="+.1f")]
         ).properties(height=300))
-        # Etiqueta con la variacion % encima de cada barra (desde el 2do año)
         etiquetas = (alt.Chart(resumen[resumen["var_pct"].notna()])
                      .mark_text(dy=-8, fontSize=11, fontWeight="bold")
-                     .encode(x=alt.X("anio_str:N"), y=alt.Y("eventos:Q"),
+                     .encode(x=alt.X("anio_str:N", sort=orden_anios), y=alt.Y("eventos:Q"),
                              text=alt.Text("var_pct:Q", format="+.0f"),
                              color=alt.condition(alt.datum.var_pct >= 0,
                                                  alt.value("#c0392b"), alt.value("#27ae60"))))
         st.altair_chart(barras_ev + etiquetas, width="stretch")
 
-    # (c) Barras de area quemada por año
+    # (c) Barras de area quemada por año CON variacion %
     with pc:
-        st.caption("Superficie quemada por año (hectáreas)")
+        st.caption("Superficie quemada por año y su variación porcentual (%) frente al año anterior")
         barras_ar = (alt.Chart(resumen).mark_bar().encode(
-            x=alt.X("anio_str:N", title="Año"),
+            x=alt.X("anio_str:N", title="Año", sort=orden_anios),
             y=alt.Y("area:Q", title="Área (ha)"),
-            color=alt.Color("anio_str:N", scale=escala_anio, legend=None),
+            color=alt.Color("anio_str:N", scale=escala_anio, sort=orden_anios, legend=None),
             tooltip=[alt.Tooltip("anio_str:N", title="Año"),
-                     alt.Tooltip("area:Q", title="Área (ha)", format=",.0f")]
+                     alt.Tooltip("area:Q", title="Área (ha)", format=",.0f"),
+                     alt.Tooltip("var_pct_area:Q", title="Var. % vs año anterior", format="+.1f")]
         ).properties(height=300))
-        st.altair_chart(barras_ar, width="stretch")
+        etiquetas_ar = (alt.Chart(resumen[resumen["var_pct_area"].notna()])
+                        .mark_text(dy=-8, fontSize=11, fontWeight="bold")
+                        .encode(x=alt.X("anio_str:N", sort=orden_anios), y=alt.Y("area:Q"),
+                                text=alt.Text("var_pct_area:Q", format="+.0f"),
+                                color=alt.condition(alt.datum.var_pct_area >= 0,
+                                                    alt.value("#c0392b"), alt.value("#27ae60"))))
+        st.altair_chart(barras_ar + etiquetas_ar, width="stretch")
 
 # ============ TOPS (al final, antes de la tabla) ============
 g3, g4 = st.columns(2)
@@ -756,26 +973,32 @@ if generar_clic:
     with st.spinner("Generando reporte PDF..."):
         try:
             gdf_dep = cargar_gdf(F_DEPTOS)
+            # Metodo de clasificacion para el mapa del PDF (jenks por defecto si
+            # el selector no existe, p.ej. cuando no se esta en vista nacional).
+            _map_metodo = {"Cortes naturales (Jenks)": "jenks",
+                           "Rangos técnicos (alerta)": "tecnicos",
+                           "Cuantiles": "cuantiles"}
+            metodo_pdf = _map_metodo.get(globals().get("metodo_clas", ""), "jenks")
             if alcance == "Nacional completo":
                 pdf_bytes = reporte.generar_pdf(
                     dff, "Nacional", "Vista nacional", etiqueta_periodo,
                     cats_presentes, gdf_deptos=gdf_dep,
                     conteo_por_depto=dff.groupby("departamento").size().to_dict(),
-                    ruta_logo=RUTA_LOGO)
+                    ruta_logo=RUTA_LOGO, metodo_clasificacion=metodo_pdf, fecha_corte=fmax)
                 fname = "reporte_nacional.pdf"
             elif nivel == "Nacional":
                 pdf_bytes = reporte.generar_pdf(
                     datos, "Nacional", "Vista nacional", etiqueta_periodo,
                     cats_presentes, gdf_deptos=gdf_dep,
                     conteo_por_depto=datos.groupby("departamento").size().to_dict(),
-                    ruta_logo=RUTA_LOGO)
+                    ruta_logo=RUTA_LOGO, metodo_clasificacion=metodo_pdf, fecha_corte=fmax)
                 fname = "reporte_nacional.pdf"
             elif nivel == "Departamental":
                 limite = gdf_dep[gdf_dep["DeNombre"] == st.session_state.departamento]
                 pdf_bytes = reporte.generar_pdf(
                     datos, "Departamental", st.session_state.departamento,
                     etiqueta_periodo, cats_presentes, gdf_limite=limite,
-                    ruta_logo=RUTA_LOGO)
+                    ruta_logo=RUTA_LOGO, fecha_corte=fmax)
                 fname = f"reporte_{st.session_state.departamento}.pdf"
             else:
                 gdf_mun = cargar_gdf(F_MUNIS)
@@ -784,7 +1007,7 @@ if generar_clic:
                     datos, "Municipal",
                     f"{st.session_state.municipio} ({st.session_state.departamento})",
                     etiqueta_periodo, cats_presentes, gdf_limite=limite,
-                    ruta_logo=RUTA_LOGO)
+                    ruta_logo=RUTA_LOGO, fecha_corte=fmax)
                 fname = f"reporte_{st.session_state.municipio}.pdf"
             st.session_state["pdf_bytes"] = pdf_bytes
             st.session_state["pdf_fname"] = fname
