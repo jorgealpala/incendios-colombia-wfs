@@ -1,5 +1,9 @@
 # 🔥 Dashboard de incendios en Colombia
 
+> Este proyecto también se sincroniza en un repositorio de la Subdirección para el
+> Conocimiento del Riesgo (UNGRD):
+> [scr-ungrd/incendios-colombia-wfs](https://github.com/scr-ungrd/incendios-colombia-wfs).
+
 Visor interactivo de incendios en Colombia a partir de los datos de
 **OroraTech WildFire Solution**. Construido con Streamlit + Folium.
 
