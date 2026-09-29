@@ -77,7 +77,13 @@ def escala_color_anios(anios):
 
 # --- Clasificacion del mapa nacional: rangos tecnicos y Jenks ---
 # Umbrales tecnicos (niveles de alerta) definidos con criterio institucional.
-RANGOS_TECNICOS = [0, 100, 500, 1500, 4000, 8000]
+# Son los 5 BORDES INFERIORES de los 5 niveles (Bajo..Critico). El nivel
+# superior (Critico) es ABIERTO: >= 4000. Su cierre se calcula con el maximo
+# real del periodo, asi el mapa funciona igual para "Todos los años" (valores
+# acumulados grandes) que para un solo mes, sin crear una clase extra sin
+# etiqueta. Los 4 cortes internos (100, 500, 1500, 4000) son FIJOS y por eso
+# comparables en el tiempo.
+RANGOS_TECNICOS = [0, 100, 500, 1500, 4000]
 ETIQUETAS_ALERTA = ["Bajo", "Moderado", "Alto", "Muy alto", "Crítico"]
 
 def jenks_breaks(valores, n_clases=5):
@@ -122,10 +128,13 @@ def calcular_cortes(vals, metodo):
     import numpy as np
     vmin, vmax = float(vals.min()), float(vals.max())
     if metodo == "Rangos técnicos (alerta)":
-        # Recortar los umbrales al rango real para que folium no falle.
-        # 'not cortes' cubre el caso vmax<=0 (todo en 0): evita IndexError.
-        cortes = [c for c in RANGOS_TECNICOS if c < vmax]
-        cortes = cortes + [vmax] if (not cortes or cortes[-1] < vmax) else cortes
+        # 5 niveles de alerta con bordes inferiores fijos y nivel superior
+        # ABIERTO. Se toman los umbrales por debajo del maximo y se cierra la
+        # escala con el maximo real: asi siempre hay a lo sumo 5 clases (una por
+        # etiqueta) y nunca sobra una sin nombre. 'or [RANGOS_TECNICOS[0]]' cubre
+        # el caso vmax<=0 (todo en 0) evitando IndexError.
+        inf = [c for c in RANGOS_TECNICOS if c < vmax] or [RANGOS_TECNICOS[0]]
+        cortes = inf + [max(vmax, inf[-1] + 1)]
         if cortes[0] > vmin:
             cortes = [vmin] + cortes
         return [float(c) for c in sorted(set(cortes))]
@@ -448,8 +457,11 @@ if nivel == "Nacional":
         for i in range(len(cortes) - 1):
             ini, fin = cortes[i], cortes[i + 1]
             col = paleta[i] if i < len(paleta) else paleta[-1]
+            es_ultimo = (i == len(cortes) - 2)
             if es_tecnico and i < len(ETIQUETAS_ALERTA):
-                txt = f"{ETIQUETAS_ALERTA[i]} ({ini:,.0f}–{fin:,.0f})"
+                # El nivel superior (Crítico) es abierto: se muestra como "≥ ini".
+                txt = (f"{ETIQUETAS_ALERTA[i]} (≥ {ini:,.0f})" if es_ultimo
+                       else f"{ETIQUETAS_ALERTA[i]} ({ini:,.0f}–{fin:,.0f})")
             else:
                 txt = f"{ini:,.0f} – {fin:,.0f}"
             items.append(
