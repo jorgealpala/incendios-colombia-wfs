@@ -34,6 +34,16 @@ F_CSV     = DIR_PROC / "incendios.csv"
 F_DEPTOS = DIR_PROC / "departamentos_simplificado.geojson"
 F_MUNIS  = DIR_PROC / "municipios_simplificado.geojson"
 
+# --- Mapa base (tiles) ---
+# CARTO (cartodbpositron) pasó a exigir API key al servirse desde dominios como
+# streamlit.app, mostrando la marca de agua "API KEY REQUIRED". Usamos el
+# basemap claro de Esri (World Light Gray), gratuito y sin clave, que conserva
+# el mismo estilo limpio. Centralizado aquí para que los 3 mapas usen el mismo.
+TILES_URL = ("https://server.arcgisonline.com/ArcGIS/rest/services/"
+             "Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}")
+TILES_ATTR = ("Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ · "
+              "Datos © OpenStreetMap contributors")
+
 # --- confidence (unica metrica): valor numerico -> color en escala verde->rojo ---
 ORDEN_CONF = ["0.0", "0.2", "0.4", "0.6", "0.8", "1.0"]
 COLOR_CONF = {
@@ -412,7 +422,7 @@ if nivel == "Nacional":
     # folium exige bins crecientes que cubran min..max y al menos 3 cortes
     usa_bins = (len(cortes) >= 3 and cortes[0] <= vals.min() and cortes[-1] >= vals.max())
 
-    m = folium.Map(location=[4.6, -74.1], zoom_start=5, tiles="cartodbpositron")
+    m = folium.Map(location=[4.6, -74.1], zoom_start=5, tiles=TILES_URL, attr=TILES_ATTR)
     choro = folium.Choropleth(
         geo_data=gj_deptos, data=conteo,
         key_on="feature.properties.DeNombre",
@@ -464,7 +474,7 @@ if nivel == "Nacional":
 elif nivel == "Departamental":
     sub = datos.dropna(subset=["lat", "lon"])
     centro = [sub["lat"].mean(), sub["lon"].mean()] if len(sub) else [4.6, -74.1]
-    m = folium.Map(location=centro, zoom_start=8, tiles="cartodbpositron")
+    m = folium.Map(location=centro, zoom_start=8, tiles=TILES_URL, attr=TILES_ATTR)
     # 1) Heatmap primero (capa de fondo)
     if len(sub):
         HeatMap(sub[["lat", "lon"]].values.tolist(), radius=12, blur=18, min_opacity=0.3).add_to(m)
@@ -539,7 +549,7 @@ else:  # Municipal
              "muchos). Solo puntos: muestra cada incendio sin agrupar. "
              "Mapa de calor: densidad de concentración.")
 
-    m = folium.Map(location=centro, zoom_start=11, tiles="cartodbpositron")
+    m = folium.Map(location=centro, zoom_start=11, tiles=TILES_URL, attr=TILES_ATTR)
     contorno_muni(st.session_state.municipio).add_to(m)
 
     if modo_vis == "Mapa de calor":
