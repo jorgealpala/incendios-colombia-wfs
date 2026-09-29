@@ -122,9 +122,10 @@ def calcular_cortes(vals, metodo):
     import numpy as np
     vmin, vmax = float(vals.min()), float(vals.max())
     if metodo == "Rangos técnicos (alerta)":
-        # Recortar los umbrales al rango real para que folium no falle
+        # Recortar los umbrales al rango real para que folium no falle.
+        # 'not cortes' cubre el caso vmax<=0 (todo en 0): evita IndexError.
         cortes = [c for c in RANGOS_TECNICOS if c < vmax]
-        cortes = cortes + [vmax] if cortes[-1] < vmax else cortes
+        cortes = cortes + [vmax] if (not cortes or cortes[-1] < vmax) else cortes
         if cortes[0] > vmin:
             cortes = [vmin] + cortes
         return [float(c) for c in sorted(set(cortes))]
@@ -219,13 +220,10 @@ sel_anio = st.sidebar.selectbox(
 
 # Segun el año elegido, definir el rango por defecto del calendario
 if sel_anio == "Todos los años":
-    # Rango por defecto institucional: 01/01/2024 a 31/05/2026,
-    # siempre acotado a lo que realmente exista en los datos.
-    ini_def = max(dt.date(2023, 1, 1), fmin_d)
-    fin_def = min(dt.date(2026, 5, 31), fmax_d)
-    if ini_def > fin_def:        # por si los datos no alcanzan ese rango
-        ini_def, fin_def = fmin_d, fmax_d
-    rango_def = (ini_def, fin_def)
+    # "Todos los años" = todo el dataset disponible (de la fecha mas antigua a la
+    # mas reciente). Asi el visor muestra la serie completa (2019-2026 y lo que se
+    # agregue en el futuro) sin topes fijos que oculten años.
+    rango_def = (fmin_d, fmax_d)
 else:
     a = int(sel_anio)
     ini_a = max(dt.date(a, 1, 1), fmin_d)
@@ -700,13 +698,13 @@ if datos["fecha"].notna().any():
         # Promedio movil de 7 dias
         diaria["media7"] = diaria["eventos"].rolling(7, min_periods=1, center=True).mean()
 
-        base = alt.Chart(diaria).encode(
+        base_dia = alt.Chart(diaria).encode(
             x=alt.X("dia:T", title="Fecha"))
-        linea_dia = base.mark_line(color="#bdc3c7", opacity=0.8).encode(
+        linea_dia = base_dia.mark_line(color="#bdc3c7", opacity=0.8).encode(
             y=alt.Y("eventos:Q", title="Eventos"),
             tooltip=[alt.Tooltip("dia:T", title="Día"),
                      alt.Tooltip("eventos:Q", title="Eventos")])
-        linea_media = base.mark_line(color="#e74c3c", strokeWidth=2).encode(
+        linea_media = base_dia.mark_line(color="#e74c3c", strokeWidth=2).encode(
             y=alt.Y("media7:Q"),
             tooltip=[alt.Tooltip("dia:T", title="Día"),
                      alt.Tooltip("media7:Q", title="Media 7 días", format=",.1f")])
